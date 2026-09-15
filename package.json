@@ -1,0 +1,19 @@
+{
+  "name": "@contro1/nanoclaw-connector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Contro1 channel for NanoClaw: routes NanoClaw admin approvals to Contro1 for human decisions, role routing and audit evidence.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test dist-test/test/governance.test.js dist-test/test/cli-integration.test.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "@types/node": "^22.5.0",
+    "typescript": "^5.9.2"
+  }
+}
