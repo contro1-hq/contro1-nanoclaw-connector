@@ -10,10 +10,10 @@
 
 2. Remove the import line `import './contro1.js';` from `src/channels/index.ts`.
 3. Delete `src/channels/contro1.ts` and `src/channels/contro1-governance.ts`.
-4. Remove the `CONTRO1_*` and `NANOCLAW_NCL` keys from `.env`, and delete the
-   credential file (`/etc/contro1/nanoclaw-agent.token`).
+4. Remove the `CONTRO1_*` and `NANOCLAW_NCL` keys from `.env`, including the
+   mapping file path.
 5. `pnpm run build` and restart the service.
-6. In Contro1, revoke the Agent Credential under **Settings > Agent credentials**.
+6. Run `contro1 disconnect nanoclaw` to revoke the runtime connections.
 
 Open Contro1 requests for this host can be cancelled from the Contro1 queue.
 Past decisions and audit records stay in Contro1.

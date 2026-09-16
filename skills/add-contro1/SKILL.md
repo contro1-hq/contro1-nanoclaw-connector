@@ -18,38 +18,23 @@ import line, like any channel skill. The steps are idempotent.
 
 ## Prerequisites
 
-1. **A Contro1 Agent Credential** for this NanoClaw host: in Contro1, register an
-   agent (for example `NanoClaw - home server`) and create an Agent Credential
-   for it under **Settings > Agent credentials** with the scopes
-   `requests:create`, `requests:read`, `requests:cancel_own` and `audit:write`.
-   The secret is shown once.
+1. **Owner-approved connection:** run `contro1 connect nanoclaw`. It discovers
+   groups, gets owner approval, installs the broker and writes the mapping file.
 2. **The `contro1` CLI** on the host, version 0.2.0 or later (it must have
    `requests ... --runtime` and `activity report`):
    `contro1 --version`.
 
 ## Apply
 
-### 1. Store the credential on the host
-
-Write the secret to a file only the NanoClaw service user can read. It is never
-mounted into agent containers.
+### 1. Connect and check before wiring anything
 
 ```bash
-sudo install -d -m 700 /etc/contro1
-sudo sh -c 'umask 077; cat > /etc/contro1/nanoclaw-agent.token'   # paste, then Ctrl-D
-sudo chown "$(id -un)" /etc/contro1/nanoclaw-agent.token
+contro1 connect nanoclaw
+contro1 doctor nanoclaw --format json
 ```
 
-### 2. Check the credential before wiring anything
-
-```bash
-CONTRO1_AGENT_TOKEN_FILE=/etc/contro1/nanoclaw-agent.token \
-  contro1 bridge doctor --target nanoclaw --ncl ./bin/ncl --format json
-```
-
-Every check must be `ok`. A `cco_cli_` token (from `contro1 auth login`) is
-refused on purpose: approvals are decided as the agent credential, never as
-whoever is logged in on the host.
+Every check must be `ok`. The mapping is per group; an unmapped group fails
+closed and never falls back to a host identity.
 
 ### 3. Copy the channel into NanoClaw
 
@@ -73,7 +58,7 @@ import './contro1.js';
 ### 5. Configure
 
 ```nc:env-set
-CONTRO1_AGENT_TOKEN_FILE=/etc/contro1/nanoclaw-agent.token
+CONTRO1_PLATFORM_MAPPING_FILE=/etc/contro1/nanoclaw-connections.json
 CONTRO1_NANOCLAW_HANDLE=approvals
 ```
 
@@ -141,11 +126,10 @@ the agent is notified. Reject a second one: the agent is told it was declined.
 means step 7 was skipped. `Other NanoClaw approvers can still receive approvals`
 means the card went to a person (see the routing rules above).
 `Channel credentials missing, skipping` for `contro1` means neither
-`CONTRO1_AGENT_TOKEN_FILE` nor `CONTRO1_AGENT_TOKEN` is set in `.env`.
+`CONTRO1_PLATFORM_MAPPING_FILE` is not set in `.env`.
 
-**`contro1 requests create failed (exit 10)`.** The token is not an agent-bound
-runtime credential. Create an Agent Credential; do not use a CLI login token or
-an organization-wide key.
+**`contro1 requests create failed`.** Run `contro1 doctor nanoclaw`; the group
+must have a current mapping and reachable broker endpoint.
 
 **`exit 4`.** The credential is missing a scope; `contro1 bridge doctor` names it.
 

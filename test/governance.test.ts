@@ -30,6 +30,7 @@ function settings(overrides: Partial<Contro1NanoClawSettings> = {}): Contro1Nano
     expiryMinutes: 60,
     rowGraceMs: 20_000,
     cliEnv: {},
+    mappingFile: '/test/contro1-connections.json',
     ...overrides,
   };
 }
@@ -150,17 +151,17 @@ function rig(opts: { now?: () => number; s?: Partial<Contro1NanoClawSettings> } 
   return { nanoclaw, contro1, adapter, governor, tick };
 }
 
-test('settings require an Agent Credential and never accept CONTRO1_TOKEN', () => {
+test('settings require a broker mapping and reject static credentials', () => {
   const host = { cwd: '/opt/nanoclaw', env: { PATH: '/usr/bin', CONTRO1_TOKEN: 'cco_cli_live_dev' } };
-  assert.equal(settingsFromEnv({}, host), null, 'no credential means the channel does not start');
+  assert.equal(settingsFromEnv({}, host), null, 'no mapping means the channel does not start');
   assert.equal(settingsFromEnv({ CONTRO1_API_URL: 'https://api.contro1.com' }, host), null);
 
-  const s = settingsFromEnv({ CONTRO1_AGENT_TOKEN_FILE: '/etc/contro1/token' }, host)!;
-  assert.deepEqual(s.cliEnv, { PATH: '/usr/bin', CONTRO1_AGENT_TOKEN_FILE: '/etc/contro1/token' });
-  assert.equal('CONTRO1_TOKEN' in s.cliEnv, false, "the developer's CLI login is never handed to the bridge");
+  const s = settingsFromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/etc/contro1/nanoclaw.json' }, { ...host, env: { PATH: '/usr/bin' } })!;
+  assert.deepEqual(s.cliEnv, { PATH: '/usr/bin' });
+  assert.equal(s.mappingFile, '/etc/contro1/nanoclaw.json');
   assert.deepEqual(s.ncl, ['/opt/nanoclaw/bin/ncl']);
   assert.equal(s.handle, 'approvals');
-  assert.throws(() => settingsFromEnv({ CONTRO1_AGENT_TOKEN: 'cc_live_x', CONTRO1_NANOCLAW_HANDLE: 'a b' }, host));
+  assert.throws(() => settingsFromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/m.json', CONTRO1_AGENT_TOKEN: 'cc_live_x' }, host), /Static Contro1 credentials/);
 });
 
 test('cards and card edits parse from the shapes NanoClaw delivers', () => {
@@ -377,20 +378,20 @@ test('deliveries to other platform ids and plain chat are ignored', async () => 
   assert.equal(governor.size, 0);
 });
 
-test('the registration file registers the contro1 channel and stays off without a credential', async () => {
+test('the registration file registers the contro1 channel and stays off without a mapping', async () => {
   const { stubEnv } = await import('../nanoclaw/src/env.js');
   const { registered } = await import('../nanoclaw/src/channels/channel-registry.js');
   await import('../nanoclaw/src/channels/contro1.js');
   const registration = registered.get('contro1');
   assert.ok(registration, 'contro1 channel registered');
-  assert.equal(registration!.factory(), null, 'no credential: NanoClaw skips the channel');
+  assert.equal(registration!.factory(), null, 'no mapping: NanoClaw skips the channel');
 
-  stubEnv.CONTRO1_AGENT_TOKEN_FILE = '/etc/contro1/token';
+  stubEnv.CONTRO1_PLATFORM_MAPPING_FILE = '/etc/contro1/nanoclaw.json';
   const adapter = (await registration!.factory()) as any;
   assert.equal(adapter.channelType, 'contro1');
   assert.equal(adapter.supportsThreads, false);
   assert.equal(adapter.openDM, undefined, 'direct-addressable: the handle is the DM platform id');
-  delete stubEnv.CONTRO1_AGENT_TOKEN_FILE;
+  delete stubEnv.CONTRO1_PLATFORM_MAPPING_FILE;
 });
 
 test('coverage report names approvers who can receive approvals outside Contro1', () => {
@@ -422,4 +423,22 @@ test('setup logs an error when Contro1 holds no approver role', async () => {
   await adapter.setup({ onAction: nanoclaw.onAction, onInbound() {}, onInboundEvent() {}, onMetadata() {} });
   await adapter.teardown();
   assert.deepEqual(errors, ['Contro1 is not an approver: no NanoClaw approval can reach it']);
+});
+test('owner-approved connections: each group uses its own endpoint and unknown groups are refused', async () => {
+  const { contro1BrokerPort, settingsFromEnv: fromEnv } = await import('../nanoclaw/src/channels/contro1-governance.js');
+  assert.throws(
+    () => fromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/m.json', CONTRO1_AGENT_TOKEN: 'cc_live_x' }, { cwd: '/x', env: {} }),
+    /Static Contro1 credentials/,
+    'a mapping and a shared credential are refused',
+  );
+  const settings = fromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/m.json', CONTRO1_CLI: '/nonexistent/contro1' }, { cwd: '/x', env: { PATH: '/bin' } })!;
+  assert.equal(settings.mappingFile, '/m.json');
+  assert.equal(settings.cliEnv.CONTRO1_AGENT_TOKEN, undefined);
+
+  const mapping = JSON.stringify({ schema_version: 1, entries: [{ platform_subject: 'g1', agent_id: 'agt_g1', endpoint: 'unix:///run/contro1/ep/g1.sock' }] });
+  const port = contro1BrokerPort(settings, () => mapping);
+  await assert.rejects(port.createRequest({}, { agent_group_id: null }), /no NanoClaw agent group/, 'no group, no identity');
+  await assert.rejects(port.createRequest({}, { agent_group_id: 'g2' }), /not connected/, 'an unmapped group is refused, never defaulted');
+  // A mapped group reaches the CLI (which does not exist here), proving the lookup passed.
+  await assert.rejects(port.createRequest({}, { agent_group_id: 'g1' }), (err: unknown) => !/not connected|no NanoClaw agent group/.test(String(err)));
 });

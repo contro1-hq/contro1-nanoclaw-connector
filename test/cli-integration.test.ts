@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 
 import {
-  contro1CliPort,
+  contro1BrokerPort,
   createContro1Adapter,
   nclPort,
   settingsFromEnv,
@@ -99,7 +99,7 @@ test('full approval round trip through the real contro1 CLI', { skip: CLI ? fals
     writeFileSync(nclScript, FAKE_NCL);
 
     const settings = settingsFromEnv(
-      { CONTRO1_AGENT_TOKEN_FILE: tokenFile, CONTRO1_API_URL: apiUrl, CONTRO1_CLI: CLI!, CONTRO1_REQUIRED_ROLE: 'security' },
+      { CONTRO1_PLATFORM_MAPPING_FILE: join(dir, 'connections.json'), CONTRO1_API_URL: apiUrl, CONTRO1_CLI: CLI!, CONTRO1_REQUIRED_ROLE: 'security' },
       // HOME points at an empty dir: no keychain profile exists to fall back to.
       { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, USERPROFILE: dir, SystemRoot: process.env.SystemRoot } },
     )!;
@@ -122,9 +122,10 @@ test('full approval round trip through the real contro1 CLI', { skip: CLI ? fals
     writeFileSync(stateFile, JSON.stringify(rows));
 
     const clicks: Array<[string, string, string]> = [];
+    writeFileSync(settings.mappingFile, JSON.stringify({ schema_version: 1, entries: [{ platform_subject: 'g1', agent_id: 'agt_g1', endpoint: 'http://127.0.0.1:1' }] }));
     const adapter = createContro1Adapter({
       settings,
-      contro1: contro1CliPort(settings),
+      contro1: contro1BrokerPort(settings),
       nanoclaw: nclPort(settings, { PATH: process.env.PATH ?? '', SystemRoot: process.env.SystemRoot ?? '' }),
       log: { info() {}, warn() {}, error() {} },
     });
@@ -177,7 +178,7 @@ test('the real CLI refuses an org-wide key: no request is created', { skip: CLI 
       { CONTRO1_AGENT_TOKEN: TOKEN, CONTRO1_API_URL: apiUrl, CONTRO1_CLI: CLI! },
       { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, USERPROFILE: dir, SystemRoot: process.env.SystemRoot } },
     )!;
-    await assert.rejects(contro1CliPort(settings).createRequest({ title: 't', request_type: 'approval', source: { integration: 'nanoclaw' }, continuation: { mode: 'decision' } }), /exit 10/);
+    await assert.rejects(contro1BrokerPort(settings).createRequest({ title: 't', request_type: 'approval', source: { integration: 'nanoclaw' }, continuation: { mode: 'decision' } }, { agent_group_id: 'g1' }));
     assert.equal(api.seen.some((s) => s.method === 'POST'), false, 'refused before any write');
   } finally {
     api.server.close();

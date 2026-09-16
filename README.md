@@ -45,21 +45,19 @@ contro1 channel ── onAction(approve | reject) ──> NanoClaw approval hand
   what is open and the Contro1 request id is deterministic
   (`nanoclaw:<action>:<approval_id>`), so a host restart resumes without
   duplicate requests.
-- **Credential stays on the host.** The Agent Credential is read from NanoClaw's
-  `.env` (never loaded into `process.env`) and handed only to the `contro1` CLI
-  child. Agent containers never see it.
+- **No credential in NanoClaw.** The Contro1 broker owns the non-exportable
+  identity; NanoClaw receives only a per-group local endpoint mapping.
 
 ## Install
 
 Follow [skills/add-contro1/SKILL.md](skills/add-contro1/SKILL.md). In short:
 
-1. Create a Contro1 Agent Credential with `requests:create`, `requests:read`,
-   `requests:cancel_own`, `audit:write`, store it in a host-only file.
-2. `contro1 bridge doctor --target nanoclaw --ncl ./bin/ncl`
-3. Copy `nanoclaw/src/channels/contro1.ts` and `contro1-governance.ts` into
+1. Run `contro1 connect nanoclaw`. It discovers groups, obtains owner approval,
+   installs the broker, and writes the host-only mapping file.
+2. Copy `nanoclaw/src/channels/contro1.ts` and `contro1-governance.ts` into
    `src/channels/`, add `import './contro1.js';` to `src/channels/index.ts`.
-4. Set `CONTRO1_AGENT_TOKEN_FILE` in `.env`, build, restart.
-5. `ncl users create --id contro1:approvals --kind contro1` and
+3. Set `CONTRO1_PLATFORM_MAPPING_FILE` in `.env`, build, restart.
+4. `ncl users create --id contro1:approvals --kind contro1` and
    `ncl roles grant --user contro1:approvals --role admin --group <agent-group-id>`.
 
 ## Coverage

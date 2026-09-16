@@ -17,7 +17,7 @@ import {
   CHANNEL_TYPE,
   CONTRO1_DEFAULTS,
   ENV_KEYS,
-  contro1CliPort,
+  contro1BrokerPort,
   createContro1Adapter,
   nclPort,
   settingsFromEnv,
@@ -30,7 +30,7 @@ registerChannelAdapter(CHANNEL_TYPE, {
     if (!settings) return null;
     return createContro1Adapter({
       settings,
-      contro1: contro1CliPort(settings),
+      contro1: contro1BrokerPort(settings),
       nanoclaw: nclPort(settings, process.env),
       log,
     });

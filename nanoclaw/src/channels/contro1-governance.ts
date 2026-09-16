@@ -24,6 +24,7 @@
  * Only this file and contro1.ts are copied into a NanoClaw checkout. It imports
  * nothing from NanoClaw except the channel adapter types.
  */
+import { readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 
@@ -58,13 +59,21 @@ export interface Contro1NanoClawSettings {
   expiryMinutes: number;
   /** OneCLI delivers the card before writing its row; wait this long for the row. */
   rowGraceMs: number;
-  /** Environment for the contro1 CLI child. Holds the Agent Credential variable and nothing secret besides. */
+  /** Non-secret environment passed to the Contro1 CLI child. */
   cliEnv: Record<string, string>;
+  /**
+   * Owner-approved connections: the mapping file the Contro1 service wrote,
+   * one entry and one endpoint per agent group.
+   */
+  mappingFile: string;
 }
 
 export const ENV_KEYS = [
+  'CONTRO1_PLATFORM_MAPPING_FILE',
+  // Rejected explicitly so a stale static credential cannot silently win.
   'CONTRO1_AGENT_TOKEN_FILE',
   'CONTRO1_AGENT_TOKEN',
+  'CONTRO1_TOKEN',
   'CONTRO1_API_URL',
   'CONTRO1_CLI',
   'CONTRO1_NANOCLAW_HANDLE',
@@ -78,30 +87,29 @@ export const ENV_KEYS = [
 const PASSTHROUGH_ENV = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'SystemRoot', 'TMPDIR', 'TEMP', 'TMP'];
 
 /**
- * Build settings from the host `.env` values. Returns null when no Agent
- * Credential is configured, which NanoClaw reports as "credentials missing" and
+ * Build settings from the host `.env` values. Returns null when no connection
+ * mapping is configured, which NanoClaw reports as "credentials missing" and
  * skips the channel: an unconfigured Contro1 channel must not accept approvals
  * it can never decide.
  *
- * Only the two AGENT variables are accepted. CONTRO1_TOKEN is deliberately not:
- * it is the variable a developer's own CLI login uses, and an approval bridge
- * must never act as whoever happens to be logged in on the host.
+ * Static runtime credentials are deliberately unsupported: a shared host
+ * credential loses group ownership and audit attribution.
  */
 export function settingsFromEnv(
   values: Partial<Record<(typeof ENV_KEYS)[number], string>>,
   host: { cwd: string; env: NodeJS.ProcessEnv },
 ): Contro1NanoClawSettings | null {
-  const tokenFile = values.CONTRO1_AGENT_TOKEN_FILE?.trim();
-  const token = values.CONTRO1_AGENT_TOKEN?.trim();
-  if (!tokenFile && !token) return null;
+  const mappingFile = values.CONTRO1_PLATFORM_MAPPING_FILE?.trim();
+  if (!mappingFile) return null;
+  if (values.CONTRO1_AGENT_TOKEN_FILE?.trim() || values.CONTRO1_AGENT_TOKEN?.trim() || values.CONTRO1_TOKEN?.trim()) {
+    throw new Error('Static Contro1 credentials are unsupported. Run `contro1 connect nanoclaw` and set only CONTRO1_PLATFORM_MAPPING_FILE.');
+  }
 
   const cliEnv: Record<string, string> = {};
   for (const key of PASSTHROUGH_ENV) {
     const value = host.env[key];
     if (value) cliEnv[key] = value;
   }
-  if (tokenFile) cliEnv.CONTRO1_AGENT_TOKEN_FILE = tokenFile;
-  else if (token) cliEnv.CONTRO1_AGENT_TOKEN = token;
 
   const handle = (values.CONTRO1_NANOCLAW_HANDLE || 'approvals').trim();
   if (!/^[A-Za-z0-9._-]{1,64}$/.test(handle)) {
@@ -118,6 +126,7 @@ export function settingsFromEnv(
     expiryMinutes: positiveInt(values.CONTRO1_EXPIRY_MINUTES, 24 * 60),
     rowGraceMs: 20_000,
     cliEnv,
+    mappingFile,
   };
 }
 
@@ -348,11 +357,16 @@ export function externalRequestId(row: Pick<ApprovalRow, 'action' | 'approval_id
 
 // ── Ports ──
 
+/** Which NanoClaw agent group a call belongs to. Decides the Contro1 identity. */
+export interface GroupScope {
+  agent_group_id: string | null;
+}
+
 export interface Contro1Port {
-  createRequest(body: Record<string, unknown>): Promise<string>;
-  getRequest(requestId: string): Promise<Record<string, unknown>>;
-  cancelRequest(requestId: string): Promise<void>;
-  report(record: Record<string, unknown>): Promise<void>;
+  createRequest(body: Record<string, unknown>, scope: GroupScope): Promise<string>;
+  getRequest(requestId: string, scope: GroupScope): Promise<Record<string, unknown>>;
+  cancelRequest(requestId: string, scope: GroupScope): Promise<void>;
+  report(record: Record<string, unknown>, scope: GroupScope): Promise<void>;
 }
 
 export interface NanoClawPort {
@@ -430,7 +444,7 @@ export class ApprovalGovernor {
     if (!item) return;
     this.tracked.delete(questionId);
     if (item.requestId) {
-      await this.safe(() => this.deps.contro1.cancelRequest(item.requestId!), 'cancel Contro1 request');
+      await this.safe(() => this.deps.contro1.cancelRequest(item.requestId!, scopeOf(item)), 'cancel Contro1 request');
     }
     await this.audit(item, 'nanoclaw.approval.expired', 'denied', `NanoClaw closed the approval: ${resolution}`);
   }
@@ -501,6 +515,7 @@ export class ApprovalGovernor {
     const binding = bindingFor(row);
     const requestId = await this.deps.contro1.createRequest(
       buildContro1Request({ row, card: item.card, binding, settings: this.deps.settings, now: new Date(this.now()) }),
+      { agent_group_id: row.agent_group_id },
     );
     item.row = row;
     item.binding = binding;
@@ -510,7 +525,7 @@ export class ApprovalGovernor {
   }
 
   private async settle(item: Tracked, onAction: ChannelSetup['onAction']): Promise<boolean> {
-    const decision = classifyContro1Request(await this.deps.contro1.getRequest(item.requestId!));
+    const decision = classifyContro1Request(await this.deps.contro1.getRequest(item.requestId!, scopeOf(item)));
     if (decision === 'pending') return false;
 
     if (decision !== 'approved') {
@@ -569,7 +584,7 @@ export class ApprovalGovernor {
             machine_observed: row ? { action: row.action, agent_group_id: row.agent_group_id, binding_hash: item.binding } : undefined,
             ...extra,
           },
-        }),
+        }, scopeOf(item)),
       'write Contro1 audit record',
     );
   }
@@ -581,6 +596,10 @@ export class ApprovalGovernor {
       this.deps.log.warn(`Could not ${what}`, { err: err instanceof Error ? err.message : String(err) });
     }
   }
+}
+
+function scopeOf(item: Tracked): GroupScope {
+  return { agent_group_id: item.row?.agent_group_id ?? null };
 }
 
 // ── The channel adapter ──
@@ -674,9 +693,54 @@ export function createContro1Adapter(deps: {
 const CLI_TIMEOUT_MS = 30_000;
 const CLI_MAX_OUTPUT = 1024 * 1024;
 
-export function contro1CliPort(settings: Contro1NanoClawSettings): Contro1Port {
+type BrokerEntry = { platform_subject: string; agent_id: string; endpoint: string; server_principal?: string };
+
+/**
+ * Owner-approved connections: each agent group reaches Contro1 through ITS OWN
+ * endpoint. A call without a group, or for a group that is not in the mapping,
+ * is refused. There is no host default identity.
+ */
+export function contro1BrokerPort(settings: Contro1NanoClawSettings, readMapping: () => string = () => readFileSync(settings.mappingFile!, 'utf8')): Contro1Port {
+  const entryFor = (scope: GroupScope): BrokerEntry => {
+    if (!scope.agent_group_id) {
+      throw new Error('Contro1: this approval has no NanoClaw agent group, so it cannot be attributed to a connected agent');
+    }
+    let parsed: { schema_version?: number; entries?: BrokerEntry[] };
+    try {
+      parsed = JSON.parse(readMapping());
+    } catch (err) {
+      throw new Error(`Contro1: cannot read the mapping file: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (parsed.schema_version !== 1 || !Array.isArray(parsed.entries)) {
+      throw new Error('Contro1: the mapping file has an unsupported format; run contro1 doctor nanoclaw');
+    }
+    const entry = parsed.entries.find((e) => e.platform_subject === scope.agent_group_id);
+    if (!entry) {
+      throw new Error(`Contro1: agent group ${scope.agent_group_id} is not connected on this computer; run contro1 connect nanoclaw`);
+    }
+    return entry;
+  };
+  const envFor = (scope: GroupScope): Record<string, string> => {
+    const entry = entryFor(scope);
+    const env: Record<string, string> = {};
+    for (const key of PASSTHROUGH_ENV) {
+      if (settings.cliEnv[key]) env[key] = settings.cliEnv[key]!;
+    }
+    env.CONTRO1_BROKER_ENDPOINT = entry.endpoint;
+    if (entry.server_principal) env.CONTRO1_BROKER_PRINCIPAL = entry.server_principal;
+    return env;
+  };
+  return {
+    createRequest: async (body, scope) => cliPortWithEnv(settings, envFor(scope)).createRequest(body, scope),
+    getRequest: async (id, scope) => cliPortWithEnv(settings, envFor(scope)).getRequest(id, scope),
+    cancelRequest: async (id, scope) => cliPortWithEnv(settings, envFor(scope)).cancelRequest(id, scope),
+    report: async (record, scope) => cliPortWithEnv(settings, envFor(scope)).report(record, scope),
+  };
+}
+
+function cliPortWithEnv(settings: Contro1NanoClawSettings, env: Record<string, string>): Contro1Port {
   const run = (args: string[], stdin?: unknown) =>
-    runJson(settings.contro1Cli, [...args, ...(settings.apiUrl ? ['--api-url', settings.apiUrl] : []), '--format', 'json', '--quiet'], settings.cliEnv, stdin);
+    runJson(settings.contro1Cli, [...args, ...(settings.apiUrl ? ['--api-url', settings.apiUrl] : []), '--format', 'json', '--quiet'], env, stdin);
   return {
     async createRequest(body) {
       const { code, json, stderr } = await run(['requests', 'create', '--runtime', '--file', '-'], body);
@@ -789,7 +853,8 @@ export function redact(value: string): string {
   return value
     .replace(/cc_live_[A-Za-z0-9._-]+/g, 'cc_live_[redacted]')
     .replace(/cc_test_[A-Za-z0-9._-]+/g, 'cc_test_[redacted]')
-    .replace(/cco_cli_[A-Za-z0-9._-]+/g, 'cco_cli_[redacted]');
+    .replace(/cco_cli_[A-Za-z0-9._-]+/g, 'cco_cli_[redacted]')
+    .replace(/ccr_live_[A-Za-z0-9._-]+/g, 'ccr_live_[redacted]');
 }
 
 export function canonicalJson(value: unknown): string {
