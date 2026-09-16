@@ -1,6 +1,6 @@
 # Contro1 NanoClaw Connector
 
-**NanoClaw already stops before an agent uses a credential or changes itself. Contro1 decides who approves it, routes it to the right reviewer, and keeps the evidence.** This connector is a NanoClaw channel that makes Contro1 the approver for NanoClaw's admin approvals.
+**Contro1 wraps your NanoClaw agents.** Every action NanoClaw holds for an admin (credential use, package installs, new MCP servers, new agents) comes to Contro1 as an approval request: Contro1 routes it to the right person in your organization, binds the decision to the exact action, and keeps the audit trail. Add the Contro1 MCP server and your agents reach company applications through Contro1 too, with Contro1 deciding what each one may use.
 
 Repository description:
 
@@ -52,22 +52,27 @@ contro1 channel ── onAction(approve | reject) ──> NanoClaw approval hand
 
 Follow [skills/add-contro1/SKILL.md](skills/add-contro1/SKILL.md). In short:
 
-1. Run `contro1 connect nanoclaw`. It discovers groups, obtains owner approval,
-   installs the broker, and writes the host-only mapping file.
+1. Run `contro1 connect nanoclaw` (as yourself, not with sudo). Each agent group
+   gets its own owner-approved connection; no key is copied into NanoClaw.
 2. Copy `nanoclaw/src/channels/contro1.ts` and `contro1-governance.ts` into
    `src/channels/`, add `import './contro1.js';` to `src/channels/index.ts`.
-3. Set `CONTRO1_PLATFORM_MAPPING_FILE` in `.env` to the mapping file `contro1 connect`
-   created (Linux: `/etc/contro1/platforms/nanoclaw.json`), build, restart.
-4. `ncl users create --id contro1:approvals --kind contro1` and
-   `ncl roles grant --user contro1:approvals --role admin --group <agent-group-id>`.
+3. Make approval cards prefer Contro1, so a request made in WhatsApp or Telegram
+   still comes to Contro1 (a small change to NanoClaw's approval delivery, step 4
+   of the skill).
+4. Build and restart. The mapping file is found in its default place.
+5. `ncl users create --id contro1:approvals --kind contro1` and
+   `ncl roles grant --user contro1:approvals --role admin --group <agent-group-id>`
+   (or `contro1 connect nanoclaw --confirm-roles` at a terminal).
+6. Optional: give a group the Contro1 MCP server to reach company applications
+   through Contro1 (step 8 of the skill).
 
 ## Coverage
 
-NanoClaw chooses the approver for every card. Credential approvals go to the
-group's admin first, so they reach Contro1. Self-modification approvals first
-prefer an admin or owner on the platform the request came from; keep human
-approver identities off your agents' platforms for full coverage. The channel
-logs every other approver at startup. See the skill for details.
+With the delivery change applied and `contro1:approvals` an admin of a group,
+every approval card for that group reaches Contro1: credential use,
+`install_packages`, `add_mcp_server` and `create_agent`. In Contro1 each request
+goes to the agent's reviewer: its accountable owner, or whoever the owner chose
+when approving the connection. The channel logs any other approver at startup.
 
 ## Audit events
 

@@ -6,10 +6,12 @@
  * from the channel barrel). All logic lives in ./contro1-governance.ts; this
  * file only reads the host `.env` and registers the adapter.
  *
- * Settings come from `.env` through NanoClaw's own reader, which never loads
- * them into process.env, so the Agent Credential cannot leak to child
- * processes or containers. It is handed only to the `contro1` CLI child.
+ * Settings come from `.env` through NanoClaw's own reader. There is no Contro1
+ * credential to protect here: the key belongs to the local Contro1 service, and
+ * the only setting that matters is where `contro1 connect nanoclaw` wrote the
+ * per-group mapping (found automatically when it is in the default place).
  */
+import { existsSync } from 'node:fs';
 import { registerChannelAdapter } from './channel-registry.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
@@ -26,7 +28,7 @@ import {
 registerChannelAdapter(CHANNEL_TYPE, {
   defaults: CONTRO1_DEFAULTS,
   factory: () => {
-    const settings = settingsFromEnv(readEnvFile([...ENV_KEYS]), { cwd: process.cwd(), env: process.env });
+    const settings = settingsFromEnv(readEnvFile([...ENV_KEYS]), { cwd: process.cwd(), env: process.env, platform: process.platform, exists: existsSync });
     if (!settings) return null;
     return createContro1Adapter({
       settings,

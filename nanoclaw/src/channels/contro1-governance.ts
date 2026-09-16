@@ -1,6 +1,13 @@
 /**
  * Contro1 governance for NanoClaw approvals.
  *
+ * WHAT IT DOES FOR A PERSON. Contro1 wraps the NanoClaw agents: every action
+ * NanoClaw holds for an admin (credential use, package installs, MCP servers,
+ * new agents) becomes a Contro1 approval request, routed to the right reviewer
+ * in the organization and kept in the audit trail. For that to hold for every
+ * card, NanoClaw must deliver approval cards to Contro1 first; the add-contro1
+ * skill applies that one change (see "Route approvals to Contro1").
+ *
  * HOW IT PLUGS IN. NanoClaw routes every admin approval (credential use through
  * OneCLI, install_packages, add_mcp_server, create_agent, ...) as an
  * `ask_question` card to the DM of one approver, and resolves it when that
@@ -8,7 +15,7 @@
  * value, userId)` and NanoClaw's own response handler takes it from there. This
  * adapter is a channel whose "DM" is Contro1. It receives the card, opens a
  * Contro1 approval request, and clicks the button a human chose in Contro1.
- * Nothing in NanoClaw is patched, bypassed or written to directly.
+ * It never writes to NanoClaw's database or bypasses its approval handler.
  *
  * WHAT NANOCLAW STILL ENFORCES. Only the approver the card was routed to may
  * resolve it (`approver_user_id`), a row resolves once, and an approved replay
@@ -16,10 +23,11 @@
  * Contro1 side: a human decision, role routing, and a binding check that the
  * approval still describes the same action the reviewer saw.
  *
- * WHAT IT NEVER HOLDS INSIDE A CONTAINER. The Agent Credential stays in the
- * host `.env`; it is handed only to the `contro1` CLI child process, never to
- * process.env and never to agent containers (NanoClaw composes container env
- * explicitly).
+ * WHAT IT NEVER HOLDS. No Contro1 credential, anywhere in NanoClaw. `contro1
+ * connect nanoclaw` gives each agent group its own owner-approved connection;
+ * the key stays with the local Contro1 service, and this channel only reads a
+ * mapping from group to that group's local endpoint. A static credential in
+ * `.env` is refused so it cannot quietly become a shared identity.
  *
  * Only this file and contro1.ts are copied into a NanoClaw checkout. It imports
  * nothing from NanoClaw except the channel adapter types.
@@ -31,6 +39,22 @@ import { createHash } from 'node:crypto';
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, OutboundMessage } from './adapter.js';
 
 export const CHANNEL_TYPE = 'contro1';
+
+const NOT_READY = /ENOENT|ECONNREFUSED|ncl\.sock/u;
+
+/** Retries while NanoClaw's admin socket is not up yet; returns either way. */
+export async function waitForNanoClaw(probe: () => Promise<unknown>, attempts = 10, delayMs = 1500): Promise<void> {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      await probe();
+      return;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!NOT_READY.test(message) || i === attempts - 1) return;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
 const INTEGRATION = 'nanoclaw';
 const CARD_MESSAGE_PREFIX = 'contro1-card:';
 
@@ -95,11 +119,25 @@ const PASSTHROUGH_ENV = ['PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA
  * Static runtime credentials are deliberately unsupported: a shared host
  * credential loses group ownership and audit attribution.
  */
+/** Where `contro1 connect nanoclaw` writes the mapping on each operating system. */
+export function defaultMappingFile(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string | undefined {
+  if (platform === 'linux') return '/etc/contro1/platforms/nanoclaw.json';
+  if (platform === 'darwin') return '/Library/Application Support/Contro1/platforms/nanoclaw.json';
+  if (platform === 'win32') return `${env.ProgramData || 'C:\\ProgramData'}\\Contro1\\platforms\\nanoclaw.json`;
+  return undefined;
+}
+
 export function settingsFromEnv(
   values: Partial<Record<(typeof ENV_KEYS)[number], string>>,
-  host: { cwd: string; env: NodeJS.ProcessEnv },
+  host: { cwd: string; env: NodeJS.ProcessEnv; platform?: NodeJS.Platform; exists?: (path: string) => boolean },
 ): Contro1NanoClawSettings | null {
-  const mappingFile = values.CONTRO1_PLATFORM_MAPPING_FILE?.trim();
+  // An explicit setting wins. Without one, the file contro1 connect wrote is
+  // used when it exists, so a connected host works without a manual .env step.
+  let mappingFile = values.CONTRO1_PLATFORM_MAPPING_FILE?.trim();
+  if (!mappingFile && host.exists && host.platform) {
+    const fallback = defaultMappingFile(host.platform, host.env);
+    if (fallback && host.exists(fallback)) mappingFile = fallback;
+  }
   if (!mappingFile) return null;
   if (values.CONTRO1_AGENT_TOKEN_FILE?.trim() || values.CONTRO1_AGENT_TOKEN?.trim() || values.CONTRO1_TOKEN?.trim()) {
     throw new Error('Static Contro1 credentials are unsupported. Run `contro1 connect nanoclaw` and set only CONTRO1_PLATFORM_MAPPING_FILE.');
@@ -636,6 +674,10 @@ export function createContro1Adapter(deps: {
 
     async setup(config: ChannelSetup): Promise<void> {
       setup = config;
+      // NanoClaw starts channels before its admin socket is listening, so the
+      // first ncl calls can fail with ENOENT. That is start-up order, not a
+      // broken connection: wait for the socket quietly before warning.
+      await waitForNanoClaw(() => deps.nanoclaw.listRoles());
       try {
         const coverage = coverageReport(await deps.nanoclaw.listRoles(), governor.approverUserId);
         if (!coverage.isApprover) {

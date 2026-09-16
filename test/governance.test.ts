@@ -12,6 +12,7 @@ import {
   parseApprovalCard,
   parseCardEdit,
   settingsFromEnv,
+  waitForNanoClaw,
   type ApprovalRow,
   type Contro1NanoClawSettings,
   type Contro1Port,
@@ -441,4 +442,24 @@ test('owner-approved connections: each group uses its own endpoint and unknown g
   await assert.rejects(port.createRequest({}, { agent_group_id: 'g2' }), /not connected/, 'an unmapped group is refused, never defaulted');
   // A mapped group reaches the CLI (which does not exist here), proving the lookup passed.
   await assert.rejects(port.createRequest({}, { agent_group_id: 'g1' }), (err: unknown) => !/not connected|no NanoClaw agent group/.test(String(err)));
+});
+
+test('the mapping contro1 connect wrote is found without a manual .env step', () => {
+  const host = { cwd: '/opt/nanoclaw', env: {}, platform: 'linux' as NodeJS.Platform, exists: (p: string) => p === '/etc/contro1/platforms/nanoclaw.json' };
+  const settings = settingsFromEnv({}, host);
+  assert.equal(settings?.mappingFile, '/etc/contro1/platforms/nanoclaw.json');
+  assert.equal(settingsFromEnv({}, { ...host, exists: () => false }), null, 'no mapping anywhere still means the channel does not start');
+  assert.equal(settingsFromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/custom.json' }, host)?.mappingFile, '/custom.json', 'an explicit setting wins');
+});
+
+test('start-up waits for the NanoClaw admin socket instead of warning', async () => {
+  let calls = 0;
+  await waitForNanoClaw(async () => {
+    calls += 1;
+    if (calls < 3) throw new Error('connect ENOENT /opt/nanoclaw/data/ncl.sock');
+  }, 5, 1);
+  assert.equal(calls, 3);
+  let other = 0;
+  await waitForNanoClaw(async () => { other += 1; throw new Error('permission denied'); }, 5, 1);
+  assert.equal(other, 1, 'a real failure is not retried');
 });
