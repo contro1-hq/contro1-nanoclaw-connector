@@ -56,7 +56,8 @@ Follow [skills/add-contro1/SKILL.md](skills/add-contro1/SKILL.md). In short:
    installs the broker, and writes the host-only mapping file.
 2. Copy `nanoclaw/src/channels/contro1.ts` and `contro1-governance.ts` into
    `src/channels/`, add `import './contro1.js';` to `src/channels/index.ts`.
-3. Set `CONTRO1_PLATFORM_MAPPING_FILE` in `.env`, build, restart.
+3. Set `CONTRO1_PLATFORM_MAPPING_FILE` in `.env` to the mapping file `contro1 connect`
+   created (Linux: `/etc/contro1/platforms/nanoclaw.json`), build, restart.
 4. `ncl users create --id contro1:approvals --kind contro1` and
    `ncl roles grant --user contro1:approvals --role admin --group <agent-group-id>`.
 

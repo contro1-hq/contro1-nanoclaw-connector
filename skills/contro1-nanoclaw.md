@@ -33,8 +33,10 @@ https://github.com/contro1-hq/contro1-nanoclaw-connector exactly:
 2. Run `contro1 doctor nanoclaw --format json`. Stop if any check fails.
 3. Copy `nanoclaw/src/channels/contro1.ts` and `contro1-governance.ts` into
    `src/channels/`, append `import './contro1.js';` to `src/channels/index.ts`.
-4. Set `CONTRO1_PLATFORM_MAPPING_FILE` (and optionally `CONTRO1_REQUIRED_ROLE`) in
-   `.env`. Build with `pnpm run build`.
+4. Set `CONTRO1_PLATFORM_MAPPING_FILE` to the mapping file `contro1 connect nanoclaw`
+   created (Linux: `/etc/contro1/platforms/nanoclaw.json`), and optionally
+   `CONTRO1_REQUIRED_ROLE`, in `.env`. Pin the channel files to connector v0.2.0
+   or later. Build with `pnpm run build`.
 5. `ncl users create --id contro1:approvals --kind contro1` and
    `ncl roles grant --user contro1:approvals --role admin --group <id>` for each
    governed group. Restart the service.
