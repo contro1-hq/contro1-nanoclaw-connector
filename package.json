@@ -1,6 +1,6 @@
 {
   "name": "@contro1/nanoclaw-connector",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "private": true,
   "description": "Contro1 channel for NanoClaw: routes NanoClaw admin approvals to Contro1 for human decisions, role routing and audit evidence.",
   "type": "module",

@@ -36,7 +36,7 @@ https://github.com/contro1-hq/contro1-nanoclaw-connector exactly:
 4. Apply step 4 of the skill: `pickApprovalDelivery` prefers `contro1` for
    `requestApproval()` and OneCLI cards only. Without it, a request made on the
    owner's chat platform goes to the owner there instead of Contro1.
-5. Pin the channel files to connector v0.2.2 or later. The mapping file is found
+5. Pin the channel files to connector v0.2.3 or later. The mapping file is found
    in its default place; set `CONTRO1_PLATFORM_MAPPING_FILE` only if it moved.
    Build with `pnpm run build`, and stamp NanoClaw's upgrade state if it has one.
 6. `ncl users create --id contro1:approvals --kind contro1` and

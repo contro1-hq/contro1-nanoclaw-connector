@@ -218,6 +218,8 @@ export interface ApprovalRow {
   channel_type: string | null;
   platform_id: string | null;
   title: string | null;
+  /** NanoClaw's card text, kept in its table. Display only, never bound. */
+  question?: string | null;
   expires_at: string | null;
   created_at: string | null;
 }
@@ -235,6 +237,7 @@ export function normalizeRow(raw: unknown): ApprovalRow | null {
     channel_type: str(r.channel_type),
     platform_id: str(r.platform_id),
     title: str(r.title),
+    question: str(r.question),
     expires_at: str(r.expires_at),
     created_at: str(r.created_at),
   };
@@ -326,6 +329,78 @@ export function classifyContro1Request(request: Record<string, unknown>): Contro
   return status === 'approved' ? 'approved' : 'denied';
 }
 
+/**
+ * What a reviewer needs to decide, built from the facts NanoClaw recorded.
+ *
+ * The card NanoClaw renders is not always available: after a restart the channel
+ * re-reads approvals from NanoClaw's table, which keeps the payload but not
+ * always the card text. So the summary and the facts come from the payload, per
+ * action, and never fall back to an id nobody can decide on.
+ */
+export function reviewerView(row: Pick<ApprovalRow, 'action' | 'payload' | 'agent_group_id'>): {
+  summary: string;
+  facts: Record<string, string>;
+  reason?: string;
+} {
+  const p = payloadObject(row.payload) ?? {};
+  const list = (value: unknown): string[] => (Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v.length > 0) : []);
+  const text = (value: unknown): string | undefined => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+  const reason = text(p.reason);
+  const group = row.agent_group_id ?? 'an agent group';
+
+  switch (row.action) {
+    case 'install_packages': {
+      const npm = list(p.npm);
+      const apt = list(p.apt);
+      const parts = [...npm.map((x) => `npm: ${x}`), ...apt.map((x) => `apt: ${x}`)];
+      return {
+        summary: `Install ${parts.length ? parts.join(', ') : 'packages'} and rebuild the agent's container`,
+        facts: {
+          ...(npm.length ? { npm_packages: npm.join(', ') } : {}),
+          ...(apt.length ? { apt_packages: apt.join(', ') } : {}),
+          agent_group: group,
+        },
+        ...(reason ? { reason } : {}),
+      };
+    }
+    case 'add_mcp_server': {
+      const name = text(p.name) ?? 'an MCP server';
+      const target = text(p.url) ?? [text(p.command), ...list(p.args)].filter(Boolean).join(' ');
+      return {
+        summary: `Add the MCP server "${name}"${target ? ` (${target})` : ''} to the agent`,
+        facts: { mcp_server: name, ...(target ? { runs: target } : {}), agent_group: group },
+        ...(reason ? { reason } : {}),
+      };
+    }
+    case 'create_agent': {
+      const name = text(p.name) ?? 'a new agent';
+      return {
+        summary: `Create a new sub-agent "${name}" with its own workspace and container`,
+        facts: { new_agent: name, agent_group: group },
+        ...(text(p.instructions) ? { reason: text(p.instructions) } : reason ? { reason } : {}),
+      };
+    }
+    case 'onecli_credential': {
+      const method = text(p.method) ?? 'A request';
+      const host = text(p.host) ?? 'an external service';
+      const path = text(p.path) ?? '';
+      return {
+        summary: `Use a stored credential for ${method} ${host}${path}`,
+        facts: { method, host, ...(path ? { path } : {}), agent_group: group },
+      };
+    }
+    default: {
+      const facts: Record<string, string> = { agent_group: group };
+      for (const [key, value] of Object.entries(p)) {
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') facts[key] = String(value);
+        else if (list(value).length) facts[key] = list(value).join(', ');
+        if (Object.keys(facts).length >= 6) break;
+      }
+      return { summary: `NanoClaw ${row.action.replace(/_/g, ' ')} for ${group}`, facts, ...(reason ? { reason } : {}) };
+    }
+  }
+}
+
 export function buildContro1Request(input: {
   row: ApprovalRow;
   card?: ApprovalCard;
@@ -338,7 +413,10 @@ export function buildContro1Request(input: {
   const label = known?.label ?? row.action;
   const risk: RiskLevel = known?.risk ?? 'medium';
   const expiresAt = row.expires_at ?? new Date(now.getTime() + settings.expiryMinutes * 60_000).toISOString();
-  const summary = card?.question || `NanoClaw ${label} for agent group ${row.agent_group_id ?? 'unknown'}`;
+  const view = reviewerView(row);
+  // NanoClaw's own card text when it is available (live, or kept in its table),
+  // otherwise a summary built from the recorded payload.
+  const summary = card?.question || row.question || view.summary;
 
   return {
     title: truncate(`NanoClaw: ${label}${row.title && row.title !== label ? ` - ${row.title}` : ''}`, 200),
@@ -362,6 +440,10 @@ export function buildContro1Request(input: {
       tool_name: `nanoclaw.${row.action}`,
       resource: row.agent_group_id ?? undefined,
       summary: truncate(summary, 4000),
+      // Shown to the reviewer as the facts of the action.
+      tool_input: view.facts,
+      // Written by the agent, so shown as its claim, never as a fact.
+      ...(view.reason ? { agent_reported: { justification: truncate(view.reason, 2000) } } : {}),
       // Facts NanoClaw's host recorded. The card question is NanoClaw-rendered
       // too, but only these are bound.
       machine_observed: {

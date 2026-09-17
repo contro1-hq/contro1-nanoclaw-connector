@@ -43,11 +43,11 @@ group fails closed and never falls back to a host identity.
 
 ### 2. Copy the channel into NanoClaw
 
-Pin the connector to a release tag. Use v0.2.2 or later: earlier releases read a
+Pin the connector to a release tag. Use v0.2.3 or later: earlier releases read a
 static credential and do not understand the mapping file.
 
 ```bash
-REF=v0.2.2
+REF=v0.2.3
 BASE=https://raw.githubusercontent.com/contro1-hq/contro1-nanoclaw-connector/$REF/nanoclaw/src/channels
 curl -fsSL "$BASE/contro1.ts" -o src/channels/contro1.ts
 curl -fsSL "$BASE/contro1-governance.ts" -o src/channels/contro1-governance.ts
@@ -190,7 +190,10 @@ NanoClaw to expire.
 Check that NanoClaw actually created an approval, not just that an agent said it
 did: ask an agent to install a package (for example "install the npm package
 left-pad"), then run `ncl approvals list`. A row there means a real card. A
-request titled `NanoClaw: Install packages` then appears in the Contro1 queue.
+request titled `NanoClaw: Install packages` then appears in the Contro1 queue,
+saying what will happen ("Install npm: left-pad and rebuild the agent's
+container"), with the packages as facts and the agent's reason shown as the
+agent's own claim. The same holds for a card picked up after a restart.
 Approve it: within a few seconds NanoClaw applies the install and the agent is
 notified. Reject a second one: the agent is told it was declined.
 
