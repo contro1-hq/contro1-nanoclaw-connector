@@ -526,7 +526,7 @@ test('the reviewer sees what the action does and why, even after a restart', () 
   const body = buildContro1Request({ row, binding: 'sha256:x', settings: { requiredRole: undefined, expiryMinutes: 60 }, now: new Date() });
   assert.equal(body.description, "Install npm: left-pad and rebuild the agent's container", 'no card, and still a sentence a reviewer can decide on');
   const context = body.context as Record<string, any>;
-  assert.deepEqual(context.tool_input, { npm_packages: 'left-pad', agent_group: 'ag-nano' });
+  assert.deepEqual(context.tool_input, { npm_packages: 'left-pad' });
   assert.equal(context.agent_reported.justification, 'Ariel asked for left-pad.', 'the reason is the agent’s claim, shown as such');
   assert.doesNotMatch(String(body.description), /for agent group ag-/u);
 
@@ -540,5 +540,5 @@ test('every NanoClaw approval action gets a reviewer summary', () => {
   assert.match(view('add_mcp_server', { name: 'github', command: 'npx', args: ['-y', 'gh-mcp'] }).summary, /Add the MCP server "github" \(npx -y gh-mcp\)/u);
   assert.match(view('create_agent', { name: 'researcher', instructions: 'find papers' }).summary, /sub-agent "researcher"/u);
   assert.match(view('onecli_credential', { method: 'POST', host: 'api.github.com', path: '/repos' }).summary, /POST api.github.com\/repos/u);
-  assert.deepEqual(view('something_new', { target: 'x', count: 2 }).facts, { agent_group: 'g1', target: 'x', count: '2' });
+  assert.deepEqual(view('something_new', { target: 'x', count: 2 }).facts, { target: 'x', count: '2' });
 });

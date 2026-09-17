@@ -358,7 +358,6 @@ export function reviewerView(row: Pick<ApprovalRow, 'action' | 'payload' | 'agen
         facts: {
           ...(npm.length ? { npm_packages: npm.join(', ') } : {}),
           ...(apt.length ? { apt_packages: apt.join(', ') } : {}),
-          agent_group: group,
         },
         ...(reason ? { reason } : {}),
       };
@@ -368,7 +367,7 @@ export function reviewerView(row: Pick<ApprovalRow, 'action' | 'payload' | 'agen
       const target = text(p.url) ?? [text(p.command), ...list(p.args)].filter(Boolean).join(' ');
       return {
         summary: `Add the MCP server "${name}"${target ? ` (${target})` : ''} to the agent`,
-        facts: { mcp_server: name, ...(target ? { runs: target } : {}), agent_group: group },
+        facts: { mcp_server: name, ...(target ? { runs: target } : {}) },
         ...(reason ? { reason } : {}),
       };
     }
@@ -376,7 +375,7 @@ export function reviewerView(row: Pick<ApprovalRow, 'action' | 'payload' | 'agen
       const name = text(p.name) ?? 'a new agent';
       return {
         summary: `Create a new sub-agent "${name}" with its own workspace and container`,
-        facts: { new_agent: name, agent_group: group },
+        facts: { new_agent: name },
         ...(text(p.instructions) ? { reason: text(p.instructions) } : reason ? { reason } : {}),
       };
     }
@@ -386,11 +385,12 @@ export function reviewerView(row: Pick<ApprovalRow, 'action' | 'payload' | 'agen
       const path = text(p.path) ?? '';
       return {
         summary: `Use a stored credential for ${method} ${host}${path}`,
-        facts: { method, host, ...(path ? { path } : {}), agent_group: group },
+        facts: { method, host, ...(path ? { path } : {}) },
       };
     }
     default: {
-      const facts: Record<string, string> = { agent_group: group };
+      // The request already names its agent; a group id is not a fact a reviewer decides on.
+      const facts: Record<string, string> = {};
       for (const [key, value] of Object.entries(p)) {
         if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') facts[key] = String(value);
         else if (list(value).length) facts[key] = list(value).join(', ');
