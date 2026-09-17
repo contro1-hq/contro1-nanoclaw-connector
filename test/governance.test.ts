@@ -13,6 +13,7 @@ import {
   parseCardEdit,
   settingsFromEnv,
   waitForNanoClaw,
+  withAgentGroup,
   type ApprovalRow,
   type Contro1NanoClawSettings,
   type Contro1Port,
@@ -422,8 +423,57 @@ test('setup logs an error when Contro1 holds no approver role', async () => {
     log: { info() {}, warn() {}, error: (msg: string) => void errors.push(msg) },
   });
   await adapter.setup({ onAction: nanoclaw.onAction, onInbound() {}, onInboundEvent() {}, onMetadata() {} });
+  // The coverage check runs on the first tick, not inside setup.
+  await new Promise((resolve) => setTimeout(resolve, 20));
   await adapter.teardown();
   assert.deepEqual(errors, ['Contro1 is not an approver: no NanoClaw approval can reach it']);
+});
+
+// Seen on the first live install: every card went to Contro1 and none arrived,
+// because the request body broke the API schema at tool_calls.
+test('the request body uses the API tool call shape', () => {
+  const row = normalizeRow({
+    approval_id: 'appr-1', action: 'install_packages', status: 'pending', session_id: 's1', agent_group_id: 'g1',
+    payload: JSON.stringify({ apt: [], npm: ['left-pad'] }), channel_type: 'contro1', platform_id: 'approvals', title: 'Install packages',
+  })!;
+  const body = buildContro1Request({ row, binding: 'sha256:x', settings: { requiredRole: undefined, expiryMinutes: 60 }, now: new Date() });
+  const calls = body.tool_calls as Array<Record<string, unknown>>;
+  assert.equal(calls.length, 1);
+  assert.deepEqual(Object.keys(calls[0]!).sort(), ['input', 'name'], 'only fields the API accepts, and no outcome for something that has not run');
+  assert.deepEqual(calls[0]!.input, { apt: [], npm: ['left-pad'] }, 'the stored JSON payload is sent as an object');
+});
+
+test('an approval without a group takes it from its session', async () => {
+  const row = normalizeRow({ approval_id: 'appr-2', action: 'install_packages', status: 'pending', session_id: 'sess-9', agent_group_id: null, channel_type: 'contro1', platform_id: 'approvals' })!;
+  const lookups: string[] = [];
+  const enriched = await withAgentGroup(row, async (id) => { lookups.push(id); return 'ag-nano'; });
+  assert.equal(enriched.agent_group_id, 'ag-nano');
+  assert.deepEqual(lookups, ['sess-9']);
+  const already = await withAgentGroup({ ...row, agent_group_id: 'g1' }, async () => 'other');
+  assert.equal(already.agent_group_id, 'g1', 'a group NanoClaw recorded is never replaced');
+});
+
+test('start-up does not wait on NanoClaw and a card missed while it was down is picked up', async () => {
+  const nanoclaw = new FakeNanoClaw();
+  nanoclaw.roles = [{ user_id: APPROVER, role: 'admin', agent_group_id: 'g1' }];
+  let socketUp = false;
+  const listRoles = nanoclaw.listRoles.bind(nanoclaw);
+  nanoclaw.listRoles = async () => { if (!socketUp) throw new Error('connect ENOENT /opt/nanoclaw/data/ncl.sock'); return listRoles(); };
+  const warnings: string[] = [];
+  const adapter = createContro1Adapter({
+    settings: { ...settings(), pollIntervalMs: 5 },
+    contro1: new FakeContro1(),
+    nanoclaw,
+    log: { info() {}, warn: (msg: string) => void warnings.push(msg), error() {} },
+  });
+  const started = Date.now();
+  await adapter.setup({ onAction: nanoclaw.onAction, onInbound() {}, onInboundEvent() {}, onMetadata() {} });
+  assert.ok(Date.now() - started < 50, 'setup returns at once');
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  socketUp = true;
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  await adapter.teardown();
+  assert.deepEqual(warnings, [], 'the socket not being up yet is start-up order, not a warning');
 });
 test('owner-approved connections: each group uses its own endpoint and unknown groups are refused', async () => {
   const { contro1BrokerPort, settingsFromEnv: fromEnv } = await import('../nanoclaw/src/channels/contro1-governance.js');

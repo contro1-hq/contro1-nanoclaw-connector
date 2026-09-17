@@ -384,9 +384,35 @@ export function buildContro1Request(input: {
       rule_reason: `NanoClaw requires admin approval for ${label.toLowerCase()}.`,
       enforcement: 'require_approval',
     },
-    tool_calls: [{ name: `nanoclaw.${row.action}`, arguments: row.payload ?? {}, outcome: 'pending_approval' }],
+    // The API's tool call is {name, input?, outcome?: success|failure|partial}.
+    // Nothing has run yet, so there is no outcome; the payload is the input.
+    tool_calls: [{ name: `nanoclaw.${row.action}`, ...(payloadObject(row.payload) ? { input: payloadObject(row.payload) } : {}) }],
     metadata: { nanoclaw: { binding_hash: binding, card_title: card?.title ?? null } },
   };
+}
+
+/** NanoClaw stores the payload as JSON text; the API wants an object. */
+export function payloadObject(payload: unknown): Record<string, unknown> | undefined {
+  let value = payload;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return undefined; }
+  }
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+/**
+ * NanoClaw's requestApproval() (install_packages, add_mcp_server, create_agent)
+ * records the session but not the agent group; only OneCLI cards carry the
+ * group. The group decides which Contro1 connection the request belongs to, so
+ * it is read from the session when the row lacks it.
+ */
+export async function withAgentGroup(
+  row: ApprovalRow,
+  groupOfSession: (sessionId: string) => Promise<string | null>,
+): Promise<ApprovalRow> {
+  if (row.agent_group_id || !row.session_id) return row;
+  const group = await groupOfSession(row.session_id);
+  return group ? { ...row, agent_group_id: group } : row;
 }
 
 export function externalRequestId(row: Pick<ApprovalRow, 'action' | 'approval_id'>): string {
@@ -659,8 +685,57 @@ export function createContro1Adapter(deps: {
   let setup: ChannelSetup | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
 
+  // Start-up checks wait for NanoClaw's admin socket, which NanoClaw opens only
+  // after channels are set up. Blocking setup on it would only delay the host,
+  // so they run on the tick and stay quiet while the socket is not there yet.
+  let ready = false;
+  let ticks = 0;
+  let warnedStartup = false;
+  const RECOVER_EVERY_TICKS = 12;
+
+  const startupChecks = async (): Promise<void> => {
+    const coverage = coverageReport(await deps.nanoclaw.listRoles(), governor.approverUserId);
+    if (!coverage.isApprover) {
+      deps.log.error('Contro1 is not an approver: no NanoClaw approval can reach it', {
+        fix: `ncl roles grant --user ${governor.approverUserId} --role admin --group <agent-group-id>`,
+      });
+    } else if (coverage.otherApprovers.length > 0) {
+      deps.log.warn('Other NanoClaw approvers can still receive approvals outside Contro1', {
+        contro1: { global: coverage.global, groups: coverage.scopedGroups },
+        others: coverage.otherApprovers,
+      });
+    }
+  };
+
   const runTick = async (): Promise<void> => {
     if (!setup) return;
+    ticks += 1;
+    let recoverNow = ticks % RECOVER_EVERY_TICKS === 0;
+    if (!ready) {
+      try {
+        await startupChecks();
+        ready = true;
+        recoverNow = true;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!NOT_READY.test(message) && !warnedStartup) {
+          warnedStartup = true;
+          deps.log.warn('Contro1 could not check approval routing coverage', { err: message });
+        }
+        if (NOT_READY.test(message)) return;
+      }
+    }
+    // Re-reading open approvals now and then picks up a card that was routed
+    // while the channel could not see it, instead of waiting for it to be sent again.
+    if (recoverNow) {
+      try {
+        const recovered = await governor.recover();
+        if (recovered) deps.log.info('Contro1 re-tracked open approvals', { recovered });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!NOT_READY.test(message)) deps.log.warn('Contro1 could not list open approvals', { err: message });
+      }
+    }
     const result = await governor.tick(setup.onAction);
     if (result.requested || result.resolved) deps.log.info('Contro1 approvals', result);
   };
@@ -674,31 +749,8 @@ export function createContro1Adapter(deps: {
 
     async setup(config: ChannelSetup): Promise<void> {
       setup = config;
-      // NanoClaw starts channels before its admin socket is listening, so the
-      // first ncl calls can fail with ENOENT. That is start-up order, not a
-      // broken connection: wait for the socket quietly before warning.
-      await waitForNanoClaw(() => deps.nanoclaw.listRoles());
-      try {
-        const coverage = coverageReport(await deps.nanoclaw.listRoles(), governor.approverUserId);
-        if (!coverage.isApprover) {
-          deps.log.error('Contro1 is not an approver: no NanoClaw approval can reach it', {
-            fix: `ncl roles grant --user ${governor.approverUserId} --role admin --group <agent-group-id>`,
-          });
-        } else if (coverage.otherApprovers.length > 0) {
-          deps.log.warn('Other NanoClaw approvers can still receive approvals outside Contro1', {
-            contro1: { global: coverage.global, groups: coverage.scopedGroups },
-            others: coverage.otherApprovers,
-          });
-        }
-      } catch (err) {
-        deps.log.warn('Contro1 could not check approval routing coverage', { err: err instanceof Error ? err.message : String(err) });
-      }
-      try {
-        const recovered = await governor.recover();
-        if (recovered) deps.log.info('Contro1 re-tracked open approvals', { recovered });
-      } catch (err) {
-        deps.log.warn('Contro1 could not list open approvals at startup', { err: err instanceof Error ? err.message : String(err) });
-      }
+      // Never waits on NanoClaw: its admin socket opens only after channels are
+      // set up. The coverage check and recovery run on the ticks instead.
       timer = setInterval(() => void runTick(), deps.settings.pollIntervalMs);
       timer.unref?.();
       void runTick();
@@ -811,11 +863,22 @@ function cliPortWithEnv(settings: Contro1NanoClawSettings, env: Record<string, s
 export function nclPort(settings: Pick<Contro1NanoClawSettings, 'ncl'>, env: NodeJS.ProcessEnv): NanoClawPort {
   const [bin, ...prefix] = settings.ncl;
   const run = (args: string[]) => runJson(bin!, [...prefix, ...args, '--json'], env as Record<string, string>);
+  const sessionGroups = new Map<string, string | null>();
+  const groupOfSession = async (sessionId: string): Promise<string | null> => {
+    if (sessionGroups.has(sessionId)) return sessionGroups.get(sessionId)!;
+    const { json } = await run(['sessions', 'get', '--id', sessionId]);
+    const frame = asRecord(json);
+    const group = frame?.ok === true ? str(asRecord(frame.data)?.agent_group_id) : null;
+    // A session's group never changes, so a found group is kept; a miss is not.
+    if (group) sessionGroups.set(sessionId, group);
+    return group;
+  };
+  const enrich = async (row: ApprovalRow | null): Promise<ApprovalRow | null> => (row ? withAgentGroup(row, groupOfSession) : null);
   return {
     async getApproval(approvalId) {
       const { json, stderr, code } = await run(['approvals', 'get', '--id', approvalId]);
       const frame = asRecord(json);
-      if (frame?.ok === true) return normalizeRow(frame.data);
+      if (frame?.ok === true) return enrich(normalizeRow(frame.data));
       const message = String(asRecord(frame?.error)?.message ?? stderr);
       if (/not found/i.test(message)) return null;
       throw new Error(`ncl approvals get failed (exit ${code}): ${message}`);

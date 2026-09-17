@@ -43,11 +43,11 @@ group fails closed and never falls back to a host identity.
 
 ### 2. Copy the channel into NanoClaw
 
-Pin the connector to a release tag. Use v0.2.1 or later: earlier releases read a
+Pin the connector to a release tag. Use v0.2.2 or later: earlier releases read a
 static credential and do not understand the mapping file.
 
 ```bash
-REF=v0.2.1
+REF=v0.2.2
 BASE=https://raw.githubusercontent.com/contro1-hq/contro1-nanoclaw-connector/$REF/nanoclaw/src/channels
 curl -fsSL "$BASE/contro1.ts" -o src/channels/contro1.ts
 curl -fsSL "$BASE/contro1-governance.ts" -o src/channels/contro1-governance.ts
