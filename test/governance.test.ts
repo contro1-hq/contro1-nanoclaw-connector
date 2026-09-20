@@ -19,6 +19,8 @@ import {
   type Contro1NanoClawSettings,
   type Contro1Port,
   type NanoClawPort,
+  withOrigin,
+  originFacts,
 } from '../nanoclaw/src/channels/contro1-governance.js';
 
 const HANDLE = 'approvals';
@@ -526,7 +528,9 @@ test('the reviewer sees what the action does and why, even after a restart', () 
   const body = buildContro1Request({ row, binding: 'sha256:x', settings: { requiredRole: undefined, expiryMinutes: 60 }, now: new Date() });
   assert.equal(body.description, "Install npm: left-pad and rebuild the agent's container", 'no card, and still a sentence a reviewer can decide on');
   const context = body.context as Record<string, any>;
-  assert.deepEqual(context.tool_input, { npm_packages: 'left-pad' });
+  // No origin was resolved for this row, and that is stated rather than
+  // omitted: a silent absence would read as an ordinary private request.
+  assert.deepEqual(context.tool_input, { requested_from: 'unknown conversation', npm_packages: 'left-pad' });
   assert.equal(context.agent_reported.justification, 'Ariel asked for left-pad.', 'the reason is the agent’s claim, shown as such');
   assert.doesNotMatch(String(body.description), /for agent group ag-/u);
 
@@ -541,4 +545,56 @@ test('every NanoClaw approval action gets a reviewer summary', () => {
   assert.match(view('create_agent', { name: 'researcher', instructions: 'find papers' }).summary, /sub-agent "researcher"/u);
   assert.match(view('onecli_credential', { method: 'POST', host: 'api.github.com', path: '/repos' }).summary, /POST api.github.com\/repos/u);
   assert.deepEqual(view('something_new', { target: 'x', count: 2 }).facts, { target: 'x', count: '2' });
+});
+
+// The scenario the origin exists for: one agent answering both a private sales
+// conversation and a group chat with other people in it. The action is
+// identical; only the room is different, and the reviewer has to see that.
+test('the reviewer is told which conversation asked', async () => {
+  const lookup = {
+    sessionContext: async (id: string) => ({
+      's-sales': { agent_group_id: 'ag-nano', messaging_group_id: 'mg-sales' },
+      's-trip': { agent_group_id: 'ag-nano', messaging_group_id: 'mg-trip' },
+    }[id] ?? null),
+    messagingGroup: async (id: string) => ({
+      'mg-sales': { name: 'Sales', is_group: false },
+      'mg-trip': { name: 'Berlin trip', is_group: true },
+    }[id] ?? null),
+  };
+  const row = (sessionId: string) => normalizeRow({
+    approval_id: 'appr-' + sessionId, action: 'install_packages', status: 'pending',
+    session_id: sessionId, agent_group_id: 'ag-nano', payload: '{}', channel_type: 'contro1', platform_id: 'approvals',
+  })!;
+
+  const sales = await withOrigin(row('s-sales'), lookup);
+  assert.deepEqual(sales.origin, { context_id: 'mg-sales', label: 'Sales', kind: 'private' });
+  assert.equal(originFacts(sales.origin).conversation, 'direct message');
+
+  const trip = await withOrigin(row('s-trip'), lookup);
+  assert.deepEqual(trip.origin, { context_id: 'mg-trip', label: 'Berlin trip', kind: 'shared' });
+  assert.match(originFacts(trip.origin).conversation, /anyone in it can instruct/);
+  assert.equal(originFacts(trip.origin).requested_from, 'Berlin trip');
+});
+
+test('an origin that cannot be resolved says so instead of disappearing', async () => {
+  const row = normalizeRow({
+    approval_id: 'appr-x', action: 'install_packages', status: 'pending', session_id: 's1',
+    agent_group_id: 'ag-nano', payload: '{}', channel_type: 'contro1', platform_id: 'approvals',
+  })!;
+
+  // The conversation is known but unreadable: named, and explicitly unknown.
+  const unreadable = await withOrigin(row, {
+    sessionContext: async () => ({ agent_group_id: 'ag-nano', messaging_group_id: 'mg-1' }),
+    messagingGroup: async () => null,
+  });
+  assert.deepEqual(unreadable.origin, { context_id: 'mg-1', kind: 'unknown' });
+  assert.match(originFacts(unreadable.origin).conversation, /could not tell who can reach/);
+
+  // A lookup that throws must not take the whole request down with it.
+  const broken = await withOrigin(row, {
+    sessionContext: async () => { throw new Error('ncl is down'); },
+    messagingGroup: async () => null,
+  });
+  assert.equal(broken.origin, undefined);
+  assert.equal(originFacts(broken.origin).requested_from, 'unknown conversation');
 });

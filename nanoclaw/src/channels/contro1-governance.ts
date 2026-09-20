@@ -220,8 +220,30 @@ export interface ApprovalRow {
   title: string | null;
   /** NanoClaw's card text, kept in its table. Display only, never bound. */
   question?: string | null;
+  /**
+   * The conversation the instruction came from. NOT `platform_id` on the row:
+   * that is where the approval CARD is delivered, which is this channel's own
+   * handle. The origin is reached through the session.
+   */
+  origin?: ApprovalOrigin;
   expires_at: string | null;
   created_at: string | null;
+}
+
+/**
+ * Where an instruction came from, and how exposed that place is.
+ *
+ * This is what separates "my sales conversation asked" from "somebody in a
+ * group chat asked". The agent itself cannot tell them apart: it answers both
+ * with its own authority, so the reviewer has to be told which one it was.
+ *
+ * `context_id` is NanoClaw's internal `mg-` id. The WhatsApp JID is a phone
+ * number or a group address and is deliberately never carried here.
+ */
+export interface ApprovalOrigin {
+  context_id: string;
+  label?: string;
+  kind: 'private' | 'shared' | 'unknown';
 }
 
 export function normalizeRow(raw: unknown): ApprovalRow | null {
@@ -440,8 +462,10 @@ export function buildContro1Request(input: {
       tool_name: `nanoclaw.${row.action}`,
       resource: row.agent_group_id ?? undefined,
       summary: truncate(summary, 4000),
-      // Shown to the reviewer as the facts of the action.
-      tool_input: view.facts,
+      // Shown to the reviewer as the facts of the action. Where the
+      // instruction came from leads, because on a shared surface it changes
+      // what the same action means.
+      tool_input: { ...originFacts(row.origin), ...view.facts },
       // Written by the agent, so shown as its claim, never as a fact.
       ...(view.reason ? { agent_reported: { justification: truncate(view.reason, 2000) } } : {}),
       // Facts NanoClaw's host recorded. The card question is NanoClaw-rendered
@@ -495,6 +519,64 @@ export async function withAgentGroup(
   if (row.agent_group_id || !row.session_id) return row;
   const group = await groupOfSession(row.session_id);
   return group ? { ...row, agent_group_id: group } : row;
+}
+
+/** What a NanoClaw session says about where it lives. */
+export interface SessionContext {
+  agent_group_id: string | null;
+  messaging_group_id: string | null;
+}
+
+/** What a NanoClaw messaging group says about itself. */
+export interface MessagingGroup {
+  name: string | null;
+  is_group: boolean;
+}
+
+/**
+ * Attach the conversation an instruction came from.
+ *
+ * Two hops, because NanoClaw splits the question: the session says which
+ * conversation it belongs to, and the conversation says whether other people
+ * are in it. Neither alone answers "who could have asked for this".
+ *
+ * Every failure leaves the origin `unknown` rather than dropping it. A reviewer
+ * being told "we could not tell where this came from" is the useful answer; an
+ * absent origin would read as an ordinary private request, which is the exact
+ * mistake this exists to prevent.
+ */
+export async function withOrigin(
+  row: ApprovalRow,
+  lookup: {
+    sessionContext: (sessionId: string) => Promise<SessionContext | null>;
+    messagingGroup: (messagingGroupId: string) => Promise<MessagingGroup | null>;
+  },
+): Promise<ApprovalRow> {
+  if (row.origin || !row.session_id) return row;
+  const session = await lookup.sessionContext(row.session_id).catch(() => null);
+  const contextId = session?.messaging_group_id;
+  if (!contextId) return row;
+
+  const group = await lookup.messagingGroup(contextId).catch(() => null);
+  const origin: ApprovalOrigin = group
+    ? {
+      context_id: contextId,
+      ...(group.name ? { label: group.name } : {}),
+      kind: group.is_group ? 'shared' : 'private',
+    }
+    : { context_id: contextId, kind: 'unknown' };
+  return { ...row, origin };
+}
+
+/** How the origin reads on a reviewer's card. */
+export function originFacts(origin: ApprovalOrigin | undefined): Record<string, string> {
+  if (!origin) return { requested_from: 'unknown conversation' };
+  const where = origin.label || origin.context_id;
+  if (origin.kind === 'shared') {
+    return { requested_from: where, conversation: 'group chat: anyone in it can instruct this agent' };
+  }
+  if (origin.kind === 'private') return { requested_from: where, conversation: 'direct message' };
+  return { requested_from: where, conversation: 'unknown: Contro1 could not tell who can reach this agent here' };
 }
 
 export function externalRequestId(row: Pick<ApprovalRow, 'action' | 'approval_id'>): string {
@@ -945,17 +1027,45 @@ function cliPortWithEnv(settings: Contro1NanoClawSettings, env: Record<string, s
 export function nclPort(settings: Pick<Contro1NanoClawSettings, 'ncl'>, env: NodeJS.ProcessEnv): NanoClawPort {
   const [bin, ...prefix] = settings.ncl;
   const run = (args: string[]) => runJson(bin!, [...prefix, ...args, '--json'], env as Record<string, string>);
-  const sessionGroups = new Map<string, string | null>();
-  const groupOfSession = async (sessionId: string): Promise<string | null> => {
-    if (sessionGroups.has(sessionId)) return sessionGroups.get(sessionId)!;
+  const sessions = new Map<string, SessionContext>();
+  const sessionContext = async (sessionId: string): Promise<SessionContext | null> => {
+    const cached = sessions.get(sessionId);
+    if (cached) return cached;
     const { json } = await run(['sessions', 'get', '--id', sessionId]);
     const frame = asRecord(json);
-    const group = frame?.ok === true ? str(asRecord(frame.data)?.agent_group_id) : null;
-    // A session's group never changes, so a found group is kept; a miss is not.
-    if (group) sessionGroups.set(sessionId, group);
+    if (frame?.ok !== true) return null;
+    const data = asRecord(frame.data);
+    const context: SessionContext = {
+      agent_group_id: str(data?.agent_group_id),
+      messaging_group_id: str(data?.messaging_group_id),
+    };
+    // Neither of a session's groups changes, so a found answer is kept; a miss
+    // is not, because the row may simply not have been written yet.
+    if (context.agent_group_id || context.messaging_group_id) sessions.set(sessionId, context);
+    return context;
+  };
+  const groupOfSession = async (sessionId: string): Promise<string | null> =>
+    (await sessionContext(sessionId))?.agent_group_id ?? null;
+
+  const messagingGroups = new Map<string, MessagingGroup>();
+  const messagingGroup = async (messagingGroupId: string): Promise<MessagingGroup | null> => {
+    const cached = messagingGroups.get(messagingGroupId);
+    if (cached) return cached;
+    const { json } = await run(['messaging-groups', 'get', '--id', messagingGroupId]);
+    const frame = asRecord(json);
+    if (frame?.ok !== true) return null;
+    const data = asRecord(frame.data);
+    // NEVER reads platform_id: that is the WhatsApp JID, a phone number or a
+    // group address, and nothing downstream needs it.
+    const group: MessagingGroup = { name: str(data?.name), is_group: Number(data?.is_group) === 1 };
+    messagingGroups.set(messagingGroupId, group);
     return group;
   };
-  const enrich = async (row: ApprovalRow | null): Promise<ApprovalRow | null> => (row ? withAgentGroup(row, groupOfSession) : null);
+
+  const enrich = async (row: ApprovalRow | null): Promise<ApprovalRow | null> => {
+    if (!row) return null;
+    return withOrigin(await withAgentGroup(row, groupOfSession), { sessionContext, messagingGroup });
+  };
   return {
     async getApproval(approvalId) {
       const { json, stderr, code } = await run(['approvals', 'get', '--id', approvalId]);

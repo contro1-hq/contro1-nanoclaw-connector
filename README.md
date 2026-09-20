@@ -12,6 +12,104 @@ Repository description:
 - Documentation: https://contro1.com/docs/nanoclaw-human-approval
 - Contro1 CLI: https://contro1.com/docs/cli
 
+## The problem this solves
+
+You run an assistant in NanoClaw. You give it access to your mailbox, because you
+talk to it in a private chat about work and you want it to read threads for you.
+That works, and it is the reason you connected it.
+
+A week later you add the same assistant to a group chat: a project with a
+client, a trip with friends, a channel with contractors. Somebody in that group
+types a message to it.
+
+**The assistant answers. It has no way to know that the person asking is not
+you.** It runs the action with its own authority, so from where it stands the
+request from the group chat and the request from your private chat look
+identical. Anyone in that group can now ask it what is in your mailbox. No
+permission was changed. Nothing was inherited. The agent simply answered the
+room it was put in.
+
+This is the confused deputy problem, and it applies to any agent that more than
+one person can instruct while it holds standing access to one person's data. A
+chat group is the common case, a shared gateway is another. It is not specific
+to NanoClaw, and it is not a misconfiguration: it is what happens when the unit
+of authorization is the agent but the unit of exposure is the conversation.
+
+### How Contro1 solves it
+
+**1. Contro1 asks which places the agent answers in, before anything is
+granted.** The connector reads NanoClaw's own wiring table, so the approval
+screen names every conversation the agent is reachable from and says which of
+them are group chats:
+
+```text
+This agent answers in 3 conversations:
+  Sales             direct message
+  Berlin trip       group chat: anyone in it can instruct this agent
+  Contractors       group chat: anyone in it can instruct this agent
+```
+
+That is the decision you were making anyway, made with the facts in front of
+you instead of behind you.
+
+**2. An agent other people can instruct cannot use a personal account on its
+own.** Organization accounts are unaffected: they are already bounded by a
+resource boundary somebody approved. The gate is specifically about one
+person's account being borrowed by software that answers to several. You can
+allow it anyway, and that decision is recorded with your name and the date, so a
+later question about how a mailbox was read has somebody to ask.
+
+**3. Every request says which conversation it came from.** The reviewer sees
+`requested_from: Berlin trip` beside the action, not just the action. The same
+command means something different depending on the room it came from, and the
+person deciding is the one who should judge that.
+
+**4. Not knowing is never read as safety.** If NanoClaw cannot be reached, or a
+conversation cannot be classified, the request says so in plain words and the
+agent is treated as reachable by other people. Silence never earns privacy.
+
+The checks run at the moment of the action and not at connection time, because
+the set of conversations an agent answers in changes afterwards, with no
+reconnect and no event Contro1 would otherwise see.
+
+### What an approval covers, whether or not you use Contro1
+
+NanoClaw already holds sensitive operations for an admin, and that is a real
+control. It is worth knowing exactly what an approval there covers.
+
+**An approval applies to the agent group.** A group answers in every
+conversation it is wired to, and `sender_scope` defaults to `all`, meaning it
+answers everyone in those conversations rather than a named list. A credential
+approved once for a group is therefore usable on behalf of whoever instructs
+that group next: in a conversation added a week later, by somebody who was never
+part of the decision. Nothing went wrong for this to happen. It is what
+group-level authorization means.
+
+NanoClaw does ship controls for this: `sender_scope: known`,
+`agent_group_members`, and `unknown_sender_policy`. They sit off the fast path,
+so most installations never change them.
+
+**Contro1 does not make the grant finer.** The unit is still the agent group,
+and saying otherwise would be a claim this connector cannot keep. What changes:
+
+- the exposure is visible before the decision rather than after it
+- personal accounts are refused to a group-facing agent unless its owner allows
+  it by name, and that decision is recorded with a name and a date
+- the request reaches the accountable person rather than whoever holds the admin DM
+- there is a record to read afterwards
+
+> The question is not whether an agent group is a coarse unit. It is whether
+> anyone saw that, decided it deliberately, and can be asked about it later.
+
+### One limit worth naming
+
+Contro1 shows which conversation an approval request came from, read from
+NanoClaw's own session on the host. It cannot yet **enforce** on it: one agent
+group serves several conversations through a single connection, and an Action
+call carries no conversation at all. The only thing that could supply one is the
+model, which is the same as letting the agent vouch for itself. So "only in my
+private chat" is not offered, because nothing would hold it up.
+
 ## How it works
 
 NanoClaw runs each agent in its own container and gates sensitive operations
