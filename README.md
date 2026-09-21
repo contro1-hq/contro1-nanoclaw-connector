@@ -72,6 +72,40 @@ The checks run at the moment of the action and not at connection time, because
 the set of conversations an agent answers in changes afterwards, with no
 reconnect and no event Contro1 would otherwise see.
 
+### The question NanoClaw asks when you add an agent to a group
+
+Wire an agent to a new conversation and NanoClaw asks, in a direct message,
+whether to attach the main agent or deploy a dedicated one for that group. It is
+the right question, asked in the right place. It is also asked at the worst
+possible moment to answer it well.
+
+**A dedicated agent is the safe answer.** It starts with nothing, so a group can
+ask it for nothing. **Attaching the main agent is the answer that costs
+something**, because the main agent is the one that has accumulated access: it is
+the one that reads your mail.
+
+What makes the moment misleading is that the two decisions are weeks apart. You
+granted the mailbox in one context, deliberately, on a screen that said so. You
+are now on a phone, adding an assistant to a group about a trip, answering what
+reads as an operational detail. Nothing on that screen mentions the mailbox and
+nobody is thinking about it.
+
+So Contro1 does not rely on you remembering. This channel re-reads which
+conversations the agent answers in, on the loop it already runs, from NanoClaw's
+own tables. Attach the main agent to a group and within a tick Contro1 knows it
+is reachable by people nobody named, and refuses it any personal account until
+its owner allows that by name. **Nothing is polled**: it reports only when the
+answer changed, so an agent sitting still costs one local read and no request.
+
+**The honest limit: this only ever tightens.** Remove the agent from that group
+and Contro1 keeps treating it as shared until somebody runs `contro1 connect`
+again, because a claim of privacy arriving on an agent's own credential is
+exactly what must not be believed. The dangerous direction is fast and the
+harmless one waits, which is the right way round.
+
+> The safest answer to that prompt is usually the one that creates a new agent.
+> An agent per room costs nothing and starts with nothing.
+
 ### What an approval covers, whether or not you use Contro1
 
 NanoClaw already holds sensitive operations for an admin, and that is a real
