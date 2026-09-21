@@ -148,6 +148,71 @@ contro1 channel ── onAction(approve | reject) ──> NanoClaw approval hand
 
 ## Install
 
+Six steps. Two ask a person to decide something in a browser, one asks for an
+administrator on this computer, and the rest are commands.
+
+Steps 1, 2, 4, 5 and 6 take a minute. **Step 3 is the long one**: it installs the
+Contro1 channel into NanoClaw itself, which copies two files into NanoClaw's
+source, adds an import, and changes where approval cards are delivered. We have
+asked NanoClaw for a supported way to do that without editing their code; until
+then it is a real step and we would rather say so than bury it.
+
+**Skipping step 3 or step 4 is the failure worth knowing about**, because nothing
+looks wrong. The connection is live, the agent reports that it is connected, and
+not one approval is ever routed. `contro1 doctor nanoclaw` reports both by name
+under "Approvals reach Contro1", and `contro1 connect` tells you what it did not
+finish instead of declaring success.
+
+### Hand this to a coding agent
+
+```text
+Set up Contro1 governance for NanoClaw on this machine.
+
+Rules: do not run sudo unless a step says to. Do not edit config by hand.
+If a command fails, stop and report the exact output rather than working around it.
+
+1. Install and sign in
+   curl -fsSL https://contro1.com/install.sh | sh
+   contro1 version
+   contro1 login
+
+2. See which agent groups exist. Connect ONLY the ones you were told to.
+   ncl groups list
+   contro1 connect nanoclaw --agent <agent-group-id>
+
+   This asks for an administrator once, to register the agent key with the
+   local Contro1 service. The person running it types their own password.
+   It then prints a code and waits for the owner to approve in a browser.
+
+3. Install the Contro1 channel into NanoClaw.
+   Follow skills/add-contro1/SKILL.md in this repository.
+   It copies two files into src/channels/, adds one import, and makes
+   approval cards prefer Contro1. Then build and restart NanoClaw.
+
+4. Make Contro1 an approver of the group
+   contro1 connect nanoclaw --confirm-roles --agent <agent-group-id>
+
+5. Check it. Every line should be ok.
+   contro1 doctor nanoclaw
+
+   The line to read carefully is "Approvals reach Contro1". If it is not ok,
+   step 3 or 4 is incomplete, and nothing will be governed until it is.
+
+6. Only if this agent should use company applications:
+   contro1 apps enable nanoclaw --agent <agent-group-id>
+
+   This opens a page for the owner to allow applications and choose which.
+   Wait for them. Then confirm the local changes it lists.
+
+Report back: the output of contro1 doctor nanoclaw, and any step that failed.
+```
+
+> `contro1 connect nanoclaw` without `--agent` connects nothing until you name
+> which groups. On a host with several it lists them and stops, rather than
+> connecting all of them.
+
+### The same steps, longer
+
 Follow [skills/add-contro1/SKILL.md](skills/add-contro1/SKILL.md). In short:
 
 1. Run `contro1 connect nanoclaw` (as yourself, not with sudo). Each agent group
