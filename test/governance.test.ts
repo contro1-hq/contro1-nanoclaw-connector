@@ -20,6 +20,10 @@ import {
   type Contro1Port,
   type NanoClawPort,
   withOrigin,
+  ReachWatcher,
+  reachDigest,
+  isSharedSurface,
+  type ReachContext,
   originFacts,
 } from '../nanoclaw/src/channels/contro1-governance.js';
 
@@ -45,7 +49,16 @@ function settings(overrides: Partial<Contro1NanoClawSettings> = {}): Contro1Nano
  * approver the card was routed to may resolve it (isAuthorizedApprovalClick),
  * a row resolves once and is then deleted (response-handler.ts).
  */
-class FakeNanoClaw implements NanoClawPort {
+class FakeNanoClawReachBase {
+  reachByGroup: Record<string, ReachContext[]> = {};
+  reachError: Error | null = null;
+  async listReach(agentGroupId: string): Promise<ReachContext[]> {
+    if (this.reachError) throw this.reachError;
+    return this.reachByGroup[agentGroupId] ?? [];
+  }
+}
+
+class FakeNanoClaw extends FakeNanoClawReachBase implements NanoClawPort {
   rows = new Map<string, ApprovalRow & { approver_user_id: string }>();
   outcomes: Array<{ id: string; value: string; userId: string }> = [];
   ignored: Array<{ id: string; reason: string }> = [];
@@ -91,7 +104,18 @@ class FakeNanoClaw implements NanoClawPort {
   };
 }
 
-class FakeContro1 implements Contro1Port {
+class FakeContro1Base {
+  declaredReach: Array<{ contexts: ReachContext[]; group: string | null }> = [];
+  declareReachError: Error | null = null;
+  connectedGroups: string[] = [];
+  connectedAgentGroups(): string[] { return this.connectedGroups; }
+  async declareReach(contexts: ReachContext[], scope: { agent_group_id?: string | null }): Promise<void> {
+    if (this.declareReachError) throw this.declareReachError;
+    this.declaredReach.push({ contexts, group: scope.agent_group_id ?? null });
+  }
+}
+
+class FakeContro1 extends FakeContro1Base implements Contro1Port {
   requests = new Map<string, { body: Record<string, unknown>; state: string; status: string }>();
   byExternal = new Map<string, string>();
   cancelled: string[] = [];
@@ -597,4 +621,87 @@ test('an origin that cannot be resolved says so instead of disappearing', async 
   });
   assert.equal(broken.origin, undefined);
   assert.equal(originFacts(broken.origin).requested_from, 'unknown conversation');
+});
+
+// The gap this closes: `contro1 connect` reads every conversation an agent
+// answers in, completely, at that moment. What it cannot see is what happens
+// next, and what happens next is NanoClaw asking in a DM whether to attach the
+// main agent to a new group. That arrives weeks after anybody decided what the
+// agent may reach, and answering it casually turns a private assistant into one
+// a room can instruct.
+test('a group added after connecting is noticed, and nothing is polled', async () => {
+  const nano = new FakeNanoClaw();
+  const contro1 = new FakeContro1();
+  const log = { info() {}, warn() {}, error() {} };
+  const watcher = new ReachWatcher({ nanoclaw: nano, contro1, log });
+
+  // As connected: one direct message, and nothing to report.
+  nano.reachByGroup['ag-nano'] = [
+    { context_id: 'mg-dm', label: 'Ariel', kind: 'private', participants_known: true },
+  ];
+  assert.equal(await watcher.check('ag-nano'), 'ignored', 'a private agent has nothing to declare');
+  assert.equal(contro1.declaredReach.length, 0);
+
+  // Standing still costs nothing: no change, no request.
+  assert.equal(await watcher.check('ag-nano'), 'unchanged');
+  assert.equal(contro1.declaredReach.length, 0, 'an agent that did not move must not talk to the server');
+
+  // Somebody answers "the main one" to NanoClaw's question.
+  nano.reachByGroup['ag-nano'].push({ context_id: 'mg-trip', label: 'Berlin trip', kind: 'shared', participants_known: false });
+  assert.equal(await watcher.check('ag-nano'), 'reported');
+  assert.equal(contro1.declaredReach.length, 1);
+  assert.equal(contro1.declaredReach[0]!.group, 'ag-nano', 'reported on the agent it is about');
+  assert.deepEqual(
+    contro1.declaredReach[0]!.contexts.map((c) => c.context_id).sort(),
+    ['mg-dm', 'mg-trip'],
+    'the whole reach is sent, not just the new room',
+  );
+
+  // And then it stops. One report per change, not one per tick.
+  assert.equal(await watcher.check('ag-nano'), 'unchanged');
+  assert.equal(contro1.declaredReach.length, 1);
+});
+
+test('what cannot be established never becomes a claim of privacy', async () => {
+  const nano = new FakeNanoClaw();
+  const contro1 = new FakeContro1();
+  const log = { info() {}, warn() {}, error() {} };
+  const watcher = new ReachWatcher({ nanoclaw: nano, contro1, log });
+
+  // A read that failed is not a reach that changed. Saying nothing leaves
+  // Contro1 with the last answer it trusted.
+  nano.reachError = new Error('ncl is down');
+  assert.equal(await watcher.check('ag-nano'), 'failed');
+  assert.equal(contro1.declaredReach.length, 0);
+
+  // A report that failed is retried, because it was never remembered.
+  nano.reachError = null;
+  nano.reachByGroup['ag-nano'] = [{ context_id: 'mg-trip', kind: 'shared', participants_known: false }];
+  contro1.declareReachError = new Error('offline');
+  assert.equal(await watcher.check('ag-nano'), 'failed');
+  contro1.declareReachError = null;
+  assert.equal(await watcher.check('ag-nano'), 'reported', 'a failed report must be tried again');
+});
+
+test('reach is only ever declared in the direction that tightens', () => {
+  // An agent that leaves every group cannot talk its way back to private: the
+  // server refuses that from an agent credential, and this does not pretend to.
+  assert.equal(isSharedSurface([{ context_id: 'a', kind: 'private', participants_known: true }]), false);
+  assert.equal(isSharedSurface([{ context_id: 'a', kind: 'shared', participants_known: false }]), true);
+  assert.equal(isSharedSurface([{ context_id: 'a', kind: 'unknown', participants_known: true }]), true);
+  // Private but open to unnamed people is still a surface more than one can reach.
+  assert.equal(isSharedSurface([{ context_id: 'a', kind: 'private', participants_known: false }]), true);
+  // Knowing nothing is not privacy.
+  assert.equal(isSharedSurface([]), true);
+
+  // The digest ignores ordering, so a reshuffle is not a change worth a request.
+  const a: ReachContext[] = [
+    { context_id: 'x', kind: 'private', participants_known: true },
+    { context_id: 'y', kind: 'shared', participants_known: false },
+  ];
+  assert.equal(reachDigest(a), reachDigest([...a].reverse()));
+  // A label is display only and must not cause traffic on its own.
+  assert.equal(reachDigest(a), reachDigest(a.map((c) => ({ ...c, label: 'renamed' }))));
+  // A kind change is exactly what must cause traffic.
+  assert.notEqual(reachDigest(a), reachDigest([a[0]!, { ...a[1]!, kind: 'private' as const }]));
 });

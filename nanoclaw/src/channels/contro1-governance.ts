@@ -579,6 +579,98 @@ export function originFacts(origin: ApprovalOrigin | undefined): Record<string, 
   return { requested_from: where, conversation: 'unknown: Contro1 could not tell who can reach this agent here' };
 }
 
+/**
+ * Notice when an agent gains a room it did not have.
+ *
+ * WHY THIS EXISTS. `contro1 connect` reads every conversation an agent answers
+ * in, so whatever is true at that moment is recorded completely. What it cannot
+ * see is what happens next, and what happens next is the ordinary case: NanoClaw
+ * asks, in a DM, whether to attach the main agent to a new group or deploy a
+ * fresh one. That question arrives weeks after anybody granted the agent access
+ * to a mailbox, on a phone, and it reads as an operational detail. Answering
+ * "the main one" quietly turns a private assistant into one a room can instruct.
+ *
+ * NOTHING IS POLLED FROM THE SERVER. The reach is computed here, from NanoClaw's
+ * own tables, on a tick this channel already runs. Contro1 hears about it only
+ * when the answer changes, so an agent sitting still costs one local read and no
+ * request at all.
+ *
+ * ONLY EVER TIGHTENING. A report can say a surface became shared; it cannot say
+ * one became private, because the server refuses that from an agent credential
+ * and should. So the dangerous direction is caught within a tick, and the
+ * harmless one waits for a reconnect, which is the right way round.
+ */
+export function reachDigest(contexts: readonly ReachContext[]): string {
+  const ordered = [...contexts]
+    .map((c) => `${c.context_id}:${c.kind}:${c.participants_known ? 1 : 0}`)
+    .sort();
+  return createHash('sha256').update(ordered.join('\n')).digest('hex').slice(0, 32);
+}
+
+/** Whether this reach would leave the agent reachable by people nobody named. */
+export function isSharedSurface(contexts: readonly ReachContext[]): boolean {
+  if (contexts.length === 0) return true;
+  return contexts.some((c) => c.kind !== 'private' || !c.participants_known);
+}
+
+export class ReachWatcher {
+  private lastDigest: string | null = null;
+
+  constructor(
+    private readonly deps: {
+      nanoclaw: Pick<NanoClawPort, 'listReach'>;
+      contro1: Pick<Contro1Port, 'declareReach'>;
+      log: Logger;
+    },
+  ) {}
+
+  /**
+   * One check. Reports only a change, and only one that tightens.
+   *
+   * Returns what it did, so a caller can log it and a test can assert it.
+   */
+  async check(agentGroupId: string): Promise<'unchanged' | 'reported' | 'ignored' | 'failed'> {
+    let contexts: ReachContext[];
+    try {
+      contexts = await this.deps.nanoclaw.listReach(agentGroupId);
+    } catch (err) {
+      // A read that failed is not a reach that changed. Saying nothing leaves
+      // Contro1 with the last answer it trusted, which is the safe one.
+      this.deps.log.warn('Contro1 could not re-read which conversations this agent answers in', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return 'failed';
+    }
+
+    const digest = reachDigest(contexts);
+    if (digest === this.lastDigest) return 'unchanged';
+
+    if (!isSharedSurface(contexts)) {
+      // Nothing to report: the server will not accept a claim of privacy from
+      // an agent's own credential, and it is right not to. Remembered anyway,
+      // so a later move back into a group is still seen as a change.
+      this.lastDigest = digest;
+      return 'ignored';
+    }
+
+    try {
+      await this.deps.contro1.declareReach(contexts, { agent_group_id: agentGroupId });
+      this.lastDigest = digest;
+      const shared = contexts.filter((c) => c.kind !== 'private');
+      this.deps.log.info('Contro1 was told this agent now answers where other people can instruct it', {
+        conversations: shared.map((c) => c.label || c.context_id),
+      });
+      return 'reported';
+    } catch (err) {
+      // Not remembered, so the next tick tries again.
+      this.deps.log.warn('Contro1 could not be told that this agent gained a shared conversation', {
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return 'failed';
+    }
+  }
+}
+
 export function externalRequestId(row: Pick<ApprovalRow, 'action' | 'approval_id'>): string {
   return `nanoclaw:${row.action}:${row.approval_id}`.replace(/[^A-Za-z0-9:._-]/g, '_').slice(0, 200);
 }
@@ -591,6 +683,10 @@ export interface GroupScope {
 }
 
 export interface Contro1Port {
+  /** Tell Contro1 who can instruct this agent. Only ever makes it stricter. */
+  declareReach(contexts: ReachContext[], scope: GroupScope): Promise<void>;
+  /** The agent groups connected on this computer, from the mapping file. */
+  connectedAgentGroups(): string[];
   createRequest(body: Record<string, unknown>, scope: GroupScope): Promise<string>;
   getRequest(requestId: string, scope: GroupScope): Promise<Record<string, unknown>>;
   cancelRequest(requestId: string, scope: GroupScope): Promise<void>;
@@ -602,6 +698,15 @@ export interface NanoClawPort {
   getApproval(approvalId: string): Promise<ApprovalRow | null>;
   listApprovals(): Promise<ApprovalRow[]>;
   listRoles(): Promise<RoleRow[]>;
+  /** Every conversation wired to one agent group, and whether each is a group chat. */
+  listReach(agentGroupId: string): Promise<ReachContext[]>;
+}
+
+export interface ReachContext {
+  context_id: string;
+  label?: string;
+  kind: 'private' | 'shared' | 'unknown';
+  participants_known: boolean;
 }
 
 export interface Logger {
@@ -856,6 +961,9 @@ export function createContro1Adapter(deps: {
   let ticks = 0;
   let warnedStartup = false;
   const RECOVER_EVERY_TICKS = 12;
+  // Same slow cadence as recover. One local read of NanoClaw's own tables, and
+  // a request to Contro1 only when the answer changed.
+  const reachWatcher = new ReachWatcher({ nanoclaw: deps.nanoclaw, contro1: deps.contro1, log: deps.log });
 
   const startupChecks = async (): Promise<void> => {
     const coverage = coverageReport(await deps.nanoclaw.listRoles(), governor.approverUserId);
@@ -892,6 +1000,13 @@ export function createContro1Adapter(deps: {
     // Re-reading open approvals now and then picks up a card that was routed
     // while the channel could not see it, instead of waiting for it to be sent again.
     if (recoverNow) {
+      // Noticing that this agent was added to a group since it was connected.
+      // NanoClaw asks that question in a DM, long after anybody decided what
+      // the agent may reach, and answering it casually is how a private
+      // assistant becomes one a room can instruct.
+      for (const agentGroupId of deps.contro1.connectedAgentGroups()) {
+        await reachWatcher.check(agentGroupId);
+      }
       try {
         const recovered = await governor.recover();
         if (recovered) deps.log.info('Contro1 re-tracked open approvals', { recovered });
@@ -989,6 +1104,18 @@ export function contro1BrokerPort(settings: Contro1NanoClawSettings, readMapping
     return env;
   };
   return {
+    connectedAgentGroups: () => {
+      // Best effort by design: an unreadable mapping is already reported
+      // loudly everywhere else, and the drift watch is not the place to
+      // start failing ticks over it.
+      try {
+        const parsed = JSON.parse(readMapping()) as { entries?: BrokerEntry[] };
+        return (parsed.entries ?? []).map((e) => e.platform_subject).filter(Boolean);
+      } catch {
+        return [];
+      }
+    },
+    declareReach: async (contexts, scope) => cliPortWithEnv(settings, envFor(scope)).declareReach(contexts, scope),
     createRequest: async (body, scope) => cliPortWithEnv(settings, envFor(scope)).createRequest(body, scope),
     getRequest: async (id, scope) => cliPortWithEnv(settings, envFor(scope)).getRequest(id, scope),
     cancelRequest: async (id, scope) => cliPortWithEnv(settings, envFor(scope)).cancelRequest(id, scope),
@@ -1021,6 +1148,13 @@ function cliPortWithEnv(settings: Contro1NanoClawSettings, env: Record<string, s
       const { code, stderr } = await run(['activity', 'report', '--file', '-'], record);
       if (code !== 0) throw new Error(`contro1 activity report failed (exit ${code}): ${redact(stderr)}`);
     },
+    // Not reachable through the CLI, which has no command for it, so it goes
+    // over the agent's own endpoint the same way everything else here does.
+    async declareReach(contexts) {
+      const { code, stderr } = await run(['agents', 'reach', '--file', '-'], { contexts });
+      if (code !== 0) throw new Error(`contro1 could not record this agent's reach (exit ${code}): ${redact(stderr)}`);
+    },
+    connectedAgentGroups: () => [],
   };
 }
 
@@ -1062,11 +1196,58 @@ export function nclPort(settings: Pick<Contro1NanoClawSettings, 'ncl'>, env: Nod
     return group;
   };
 
+  /*
+   * Which conversations one agent group answers in, read from NanoClaw itself.
+   *
+   * Two hops, because NanoClaw splits the question: a wiring says which
+   * conversation reaches which agent group and on what terms, and the
+   * conversation says whether other people are in it.
+   *
+   * A direct message counts its participants as known whatever sender_scope
+   * says. The default is "all", which in a group means "answer everyone in the
+   * room" and is the exposure worth refusing, and in a one to one chat means
+   * "answer the one person who can write here", because only one can.
+   *
+   * The WhatsApp address is never read. It is a phone number or a group
+   * address, nothing here needs it, and it would end up stored in Contro1.
+   */
+  const listReach = async (agentGroupId: string): Promise<ReachContext[]> => {
+    const { json } = await run(['wirings', 'list']);
+    const frame = asRecord(json);
+    if (frame?.ok !== true || !Array.isArray(frame.data)) {
+      throw new Error('ncl wirings list did not answer');
+    }
+    const out: ReachContext[] = [];
+    for (const raw of frame.data) {
+      const w = asRecord(raw);
+      const mgId = str(w?.messaging_group_id);
+      if (!w || str(w.agent_group_id) !== agentGroupId || !mgId) continue;
+      const entry: ReachContext = {
+        context_id: mgId,
+        kind: 'unknown',
+        participants_known: str(w.sender_scope) === 'known',
+      };
+      const group = await messagingGroup(mgId).catch(() => null);
+      if (group) {
+        if (group.name) entry.label = group.name;
+        if (group.is_group) {
+          entry.kind = 'shared';
+        } else {
+          entry.kind = 'private';
+          entry.participants_known = true;
+        }
+      }
+      out.push(entry);
+    }
+    return out;
+  };
+
   const enrich = async (row: ApprovalRow | null): Promise<ApprovalRow | null> => {
     if (!row) return null;
     return withOrigin(await withAgentGroup(row, groupOfSession), { sessionContext, messagingGroup });
   };
   return {
+    listReach,
     async getApproval(approvalId) {
       const { json, stderr, code } = await run(['approvals', 'get', '--id', approvalId]);
       const frame = asRecord(json);
