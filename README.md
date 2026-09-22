@@ -271,7 +271,14 @@ needs a separate, bounded bearer lease because its requests leave NanoClaw
 through OneCLI. The host stores that lease in the OneCLI vault and grants it
 only to the matching agent group; it is never put in the agent container.
 
-What the MCP server offers depends on what the connection is allowed to do.
+The MCP server grants nothing of its own. It is the Access page seen from
+wherever the call is coming from: the same grants, the same policy, the same
+refusals. Whoever is calling, not whoever is asking - an agent sees its own
+permissions, a coding assistant sees the permissions of the person who approved
+it.
+
+What the MCP server offers therefore depends on what the connection is allowed
+to do.
 
 | You want | You need |
 |---|---|
