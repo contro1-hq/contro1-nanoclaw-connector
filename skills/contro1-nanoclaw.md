@@ -36,14 +36,17 @@ https://github.com/contro1-hq/contro1-nanoclaw-connector exactly:
 4. Apply step 4 of the skill: `pickApprovalDelivery` prefers `contro1` for
    `requestApproval()` and OneCLI cards only. Without it, a request made on the
    owner's chat platform goes to the owner there instead of Contro1.
-5. Pin the channel files to connector v0.2.4 or later. The mapping file is found
+5. Pin the channel files to a connector release with the NanoClaw MCP host-claim
+   flow. The mapping file is found
    in its default place; set `CONTRO1_PLATFORM_MAPPING_FILE` only if it moved.
    Build with `pnpm run build`, and stamp NanoClaw's upgrade state if it has one.
 6. `ncl users create --id contro1:approvals --kind contro1` and
    `ncl roles grant --user contro1:approvals --role admin --group <id>` for each
    governed group, run as the NanoClaw user. Restart the service.
 7. If the user wants agents to use company applications, follow step 8 of the
-   skill (Contro1 MCP server per group) after they allow applications in Contro1.
+   skill: the agent requests the remote MCP URL from chat and the accountable
+   owner approves the host-only OneCLI grant in Contro1. Do not install a
+   stdio MCP server or mount the host broker socket into the container.
 
 ## Rules
 

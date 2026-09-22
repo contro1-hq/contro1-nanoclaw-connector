@@ -121,6 +121,13 @@ class FakeContro1 extends FakeContro1Base implements Contro1Port {
   cancelled: string[] = [];
   reports: Array<Record<string, unknown>> = [];
   failGet = false;
+  provisioned: Array<{ requestId: string; group: string | null }> = [];
+  failProvision = false;
+
+  async provisionMcp(requestId: string, scope: { agent_group_id: string | null }) {
+    if (this.failProvision) throw new Error('host vault unavailable');
+    this.provisioned.push({ requestId, group: scope.agent_group_id });
+  }
 
   async createRequest(body: Record<string, unknown>) {
     const ext = String(body.external_request_id);
@@ -190,6 +197,10 @@ test('settings require a broker mapping and reject static credentials', () => {
   assert.equal(s.mappingFile, '/etc/contro1/nanoclaw.json');
   assert.deepEqual(s.ncl, ['/opt/nanoclaw/bin/ncl']);
   assert.equal(s.handle, 'approvals');
+  const onecli = settingsFromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/m.json', ONECLI_URL: 'http://127.0.0.1:10254', ONECLI_API_KEY: 'oc_test_key' }, host)!;
+  assert.equal(onecli.onecliApiKey, 'oc_test_key');
+  assert.equal(onecli.onecliUrl, 'http://127.0.0.1:10254');
+  assert.equal(onecli.cliEnv.ONECLI_API_KEY, undefined, 'ordinary approval children never receive OneCLI credentials');
   assert.throws(() => settingsFromEnv({ CONTRO1_PLATFORM_MAPPING_FILE: '/m.json', CONTRO1_AGENT_TOKEN: 'cc_live_x' }, host), /Static Contro1 credentials/);
 });
 
@@ -660,6 +671,24 @@ test('a group added after connecting is noticed, and nothing is polled', async (
   // And then it stops. One report per change, not one per tick.
   assert.equal(await watcher.check('ag-nano'), 'unchanged');
   assert.equal(contro1.declaredReach.length, 1);
+});
+
+test('Contro1 MCP is provisioned on the host before NanoClaw applies the approved URL', async () => {
+  const { nanoclaw, contro1, adapter, tick } = rig();
+  nanoclaw.add({ approval_id: 'appr-mcp', action: 'add_mcp_server', agent_group_id: 'g1',
+    payload: { name: 'contro1', type: 'http', url: 'https://api.contro1.com/api/centcom/mcp' } });
+  await adapter.deliver(HANDLE, null, card('appr-mcp', 'Add MCP server'));
+  await tick();
+  contro1.decide('req_1', 'approved');
+  contro1.failProvision = true;
+  await tick();
+  assert.equal(nanoclaw.outcomes.length, 0, 'a failed vault grant must not apply a 401-only MCP URL');
+  contro1.failProvision = false;
+  await tick();
+  assert.deepEqual(contro1.provisioned, [{ requestId: 'req_1', group: 'g1' }]);
+  assert.deepEqual(nanoclaw.outcomes, [{ id: 'appr-mcp', value: 'approve', userId: APPROVER }]);
+  const body = contro1.requests.get('req_1')!.body;
+  assert.match(String(body.description), /enable access to applications/);
 });
 
 test('what cannot be established never becomes a claim of privacy', async () => {

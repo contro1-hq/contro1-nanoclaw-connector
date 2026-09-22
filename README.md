@@ -260,22 +260,24 @@ Follow [skills/add-contro1/SKILL.md](skills/add-contro1/SKILL.md). In short:
 5. `ncl users create --id contro1:approvals --kind contro1` and
    `ncl roles grant --user contro1:approvals --role admin --group <agent-group-id>`
    (or `contro1 connect nanoclaw --confirm-roles` at a terminal).
-6. Optional: give a group the Contro1 MCP server to reach company applications
-   through Contro1 (step 8 of the skill).
+6. Optional: ask the agent in chat to add the Contro1 remote MCP URL. The
+   accountable owner approves in Contro1; the host bridge places a bounded
+   per-agent lease in OneCLI before NanoClaw applies the URL (step 8).
 
 ## What one connection actually turns on
 
-Connecting is one thing, and it gives you two surfaces through the same
-credential: approval requests, and the Contro1 MCP server. They are not separate
-connections and there is no second key.
+The host connection carries approvals with a DPoP key. The remote MCP server
+needs a separate, bounded bearer lease because its requests leave NanoClaw
+through OneCLI. The host stores that lease in the OneCLI vault and grants it
+only to the matching agent group; it is never put in the agent container.
 
 What the MCP server offers depends on what the connection is allowed to do.
 
 | You want | You need |
 |---|---|
 | Approvals actually arrive in Contro1 | connect, **plus** the channel installed, **plus** the role granted |
-| The MCP server answers at all: identity, approval tools | connect alone |
-| The MCP server reaches Gmail, calendar, a tracker | connect, **plus** the owner allowing applications |
+| The MCP server answers at all: identity, approval tools | connect, **plus** owner approval of the MCP card and host OneCLI provisioning |
+| The MCP server reaches Gmail, calendar, a tracker | the MCP connection, **plus** the owner allowing those application actions |
 
 An **approvals-only** connection carries `requests:create`, `requests:read`,
 `requests:wait`, `requests:cancel_own` and `audit:write`. The agent can identify

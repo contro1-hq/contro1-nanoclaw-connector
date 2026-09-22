@@ -151,27 +151,28 @@ Restart the service. The startup log shows `Channel adapter started` for
 
 ### 8. Optional: reach company applications through Contro1 (MCP)
 
-Approvals cover what NanoClaw itself holds. To let a group's agents use company
-applications (mail, calendar, tickets) with Contro1 deciding what they may do,
-give the group the Contro1 MCP server:
+The agent can ask from WhatsApp to add the remote Contro1 MCP server. It must
+submit `add_mcp_server` with exactly:
 
-1. In Contro1, open the agent and allow applications for its connection, then
-   choose the application actions it may use (an administrator grants; anyone
-   else sends a request that grants nothing until approved).
-2. Add the server to that group. It runs `contro1 mcp serve` against the group's
-   own endpoint from the mapping file, so the group can only ever act as itself:
-
-```bash
-ENDPOINT=$(jq -r '.entries[] | select(.platform_subject=="<agent-group-id>") | .endpoint' /etc/contro1/platforms/nanoclaw.json)
-ncl config add-mcp-server --id <agent-group-id> --name contro1 \
-  --command contro1 --args "[\"mcp\",\"serve\",\"--broker-endpoint\",\"$ENDPOINT\"]"
-ncl groups restart --id <agent-group-id>
+```json
+{"name":"contro1","url":"https://api.contro1.com/api/centcom/mcp"}
 ```
 
-The server runs inside the group's container, so the container needs the
-`contro1` binary and that one group's endpoint socket mounted, and nothing else
-from Contro1. Adding an MCP server is itself an approval in NanoClaw, so this
-request arrives in Contro1 like any other.
+For a self-hosted Contro1 deployment, use that deployment's public HTTPS API
+origin instead. The URL must match the connector's `CONTRO1_API_URL`.
+
+The Contro1 request is routed specifically to the accountable owner. Its card
+states that approving also enables agent-runtime application access and lets
+the host place a bounded credential in OneCLI. After approval, the host bridge
+claims that credential with its DPoP connection, stores it in OneCLI and grants
+it only to this NanoClaw agent group. Only then does it allow NanoClaw to apply
+the MCP URL. There is no browser callback to the host, no code to paste from
+WhatsApp, and no credential in the agent's `container.json`.
+
+The NanoClaw host must have the matching Contro1 CLI and OneCLI CLI installed,
+and the OneCLI gateway must have created this group as an agent. The owner must
+still allow the specific application actions in Contro1; connecting MCP alone
+does not grant arbitrary access to Gmail or other applications.
 
 ## Which approvals reach Contro1
 

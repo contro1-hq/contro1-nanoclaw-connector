@@ -85,6 +85,10 @@ export interface Contro1NanoClawSettings {
   rowGraceMs: number;
   /** Non-secret environment passed to the Contro1 CLI child. */
   cliEnv: Record<string, string>;
+  /** Host-only OneCLI control-plane settings; never passed to NanoClaw or ordinary approval children. */
+  onecliUrl?: string;
+  onecliApiKey?: string;
+  onecliProject?: string;
   /**
    * Owner-approved connections: the mapping file the Contro1 service wrote,
    * one entry and one endpoint per agent group.
@@ -105,6 +109,9 @@ export const ENV_KEYS = [
   'CONTRO1_POLL_INTERVAL_MS',
   'CONTRO1_EXPIRY_MINUTES',
   'NANOCLAW_NCL',
+  'ONECLI_URL',
+  'ONECLI_API_KEY',
+  'ONECLI_PROJECT',
 ] as const;
 
 /** Variables the CLI child needs to run at all. Copied from the host process, never secrets. */
@@ -164,6 +171,9 @@ export function settingsFromEnv(
     expiryMinutes: positiveInt(values.CONTRO1_EXPIRY_MINUTES, 24 * 60),
     rowGraceMs: 20_000,
     cliEnv,
+    onecliUrl: values.ONECLI_URL || host.env.ONECLI_URL,
+    onecliApiKey: values.ONECLI_API_KEY || host.env.ONECLI_API_KEY,
+    onecliProject: values.ONECLI_PROJECT || host.env.ONECLI_PROJECT,
     mappingFile,
   };
 }
@@ -387,9 +397,12 @@ export function reviewerView(row: Pick<ApprovalRow, 'action' | 'payload' | 'agen
     case 'add_mcp_server': {
       const name = text(p.name) ?? 'an MCP server';
       const target = text(p.url) ?? [text(p.command), ...list(p.args)].filter(Boolean).join(' ');
+      const contro1Mcp = name === 'contro1' && /^https:\/\/[^/]+\/api\/centcom\/mcp$/u.test(target ?? '');
       return {
-        summary: `Add the MCP server "${name}"${target ? ` (${target})` : ''} to the agent`,
-        facts: { mcp_server: name, ...(target ? { runs: target } : {}) },
+        summary: contro1Mcp
+          ? `Connect this NanoClaw agent to Contro1 MCP and enable access to applications you allow. A bounded credential will be stored in the host OneCLI vault and granted only to this agent.`
+          : `Add the MCP server "${name}"${target ? ` (${target})` : ''} to the agent`,
+        facts: { mcp_server: name, ...(target ? { runs: target } : {}), ...(contro1Mcp ? { host_credential: 'OneCLI vault, granted only to this agent' } : {}) },
         ...(reason ? { reason } : {}),
       };
     }
@@ -438,7 +451,10 @@ export function buildContro1Request(input: {
   const view = reviewerView(row);
   // NanoClaw's own card text when it is available (live, or kept in its table),
   // otherwise a summary built from the recorded payload.
-  const summary = card?.question || row.question || view.summary;
+  const rowPayload = payloadObject(row.payload);
+  const contro1Mcp = row.action === 'add_mcp_server' && rowPayload?.name === 'contro1'
+    && typeof rowPayload.url === 'string' && /^https:\/\/[^/]+\/api\/centcom\/mcp$/u.test(rowPayload.url);
+  const summary = contro1Mcp ? view.summary : card?.question || row.question || view.summary;
 
   return {
     title: truncate(`NanoClaw: ${label}${row.title && row.title !== label ? ` - ${row.title}` : ''}`, 200),
@@ -691,6 +707,8 @@ export interface Contro1Port {
   getRequest(requestId: string, scope: GroupScope): Promise<Record<string, unknown>>;
   cancelRequest(requestId: string, scope: GroupScope): Promise<void>;
   report(record: Record<string, unknown>, scope: GroupScope): Promise<void>;
+  /** Host-only: exchange an owner-approved Contro1 MCP card for one agent-scoped OneCLI vault grant. */
+  provisionMcp?(requestId: string, scope: GroupScope): Promise<void>;
 }
 
 export interface NanoClawPort {
@@ -885,6 +903,27 @@ export class ApprovalGovernor {
         current_hash: bindingFor(current),
       });
       return true;
+    }
+
+    // Adding the URL alone restarts NanoClaw with an MCP server that returns
+    // 401 forever. For Contro1, complete the owner-approved host vault grant
+    // first. This runs in NanoClaw's host process, never inside the agent.
+    const payload = payloadObject(current.payload);
+    const mcpUrl = this.deps.settings.apiUrl
+      ? `${this.deps.settings.apiUrl.replace(/\/$/u, '')}/api/centcom/mcp`
+      : 'https://api.contro1.com/api/centcom/mcp';
+    if (current.action === 'add_mcp_server' && payload?.name === 'contro1') {
+      if (payload.url !== mcpUrl) {
+        this.tracked.delete(item.questionId);
+        onAction(item.questionId, 'reject', this.approverUserId);
+        await this.audit(item, 'nanoclaw.approval.invalid_contro1_mcp', 'denied',
+          'The proposed Contro1 MCP URL did not match this deployment; nothing was installed.');
+        return true;
+      }
+      if (!this.deps.contro1.provisionMcp) {
+        throw new Error('Contro1 MCP provisioning is unavailable on this host');
+      }
+      await this.deps.contro1.provisionMcp(item.requestId!, scopeOf(item));
     }
 
     this.tracked.delete(item.questionId);
@@ -1120,6 +1159,15 @@ export function contro1BrokerPort(settings: Contro1NanoClawSettings, readMapping
     getRequest: async (id, scope) => cliPortWithEnv(settings, envFor(scope)).getRequest(id, scope),
     cancelRequest: async (id, scope) => cliPortWithEnv(settings, envFor(scope)).cancelRequest(id, scope),
     report: async (record, scope) => cliPortWithEnv(settings, envFor(scope)).report(record, scope),
+    provisionMcp: async (requestId, scope) => {
+      const env = envFor(scope);
+      // Only the trusted host-side provisioning child needs OneCLI's control
+      // credential. Ordinary approval CLI children never inherit it.
+      if (settings.onecliApiKey) env.ONECLI_API_KEY = settings.onecliApiKey;
+      if (settings.onecliUrl) env.ONECLI_API_HOST = settings.onecliUrl;
+      if (settings.onecliProject) env.ONECLI_PROJECT = settings.onecliProject;
+      await cliPortWithEnv(settings, env).provisionMcp!(requestId, scope);
+    },
   };
 }
 
@@ -1147,6 +1195,11 @@ function cliPortWithEnv(settings: Contro1NanoClawSettings, env: Record<string, s
     async report(record) {
       const { code, stderr } = await run(['activity', 'report', '--file', '-'], record);
       if (code !== 0) throw new Error(`contro1 activity report failed (exit ${code}): ${redact(stderr)}`);
+    },
+    async provisionMcp(requestId, scope) {
+      if (!scope.agent_group_id) throw new Error('Contro1 MCP provisioning needs an agent group');
+      const { code, stderr } = await run(['apps', 'claim-nanoclaw', requestId, scope.agent_group_id]);
+      if (code !== 0) throw new Error(`Contro1 MCP host provisioning failed (exit ${code}): ${redact(stderr)}`);
     },
     // Not reachable through the CLI, which has no command for it, so it goes
     // over the agent's own endpoint the same way everything else here does.
