@@ -290,6 +290,16 @@ When the owner allows applications, the same connection gains `actions:read`,
 key, same endpoint, larger tool set. Nothing is reconnected and nothing is
 reissued.
 
+That pattern is the whole design, and it holds for every caller. There is one
+MCP address, one tool catalog, and a gate that decides what each caller may
+reach. What changes between an agent on a connection and a person who has
+connected a coding assistant is not the endpoint and not the list: it is the
+credential, and therefore how far it may go. An agent acts as itself, with its
+own permissions. A coding assistant acts as the person who approved it, never
+with more than that person already has, and only if they approved running
+actions specifically. Neither can be widened by pointing at a different URL,
+because there is not one.
+
 > An agent that says it is connected and cannot read your mail is usually right
 > about both. Check `contro1 doctor` before looking for a wrong address.
 
